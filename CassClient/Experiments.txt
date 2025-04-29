@@ -1,0 +1,42 @@
+Experimet List : 
+experiments are performed with tracing off if row cache hit/miss not required
+otherwise tracing is on. Client latency is always available, server latency is available only if tracing is on.
+
+Thoroughout all experiments Replication factor is always 5
+
+
+1. Write Experiment
+    consistency level is quorum
+    a. insert 40 gb of data, 40,000 writes 1MB each for EC-Cassandra 
+    b. insert 40 gb of data, 80,000 writes 0.5MB each for EC-Cassandra 
+    c. insert 40 gb of data, 40,000 writes 1MB each for Cassandra
+
+2. Read Experiment
+    consistency level is quorum
+    a. read 40K ops  1MB each for EC-Cassandra 
+    b. read 40K ops  0.5MB each for EC-Cassandra 
+    c. read 40K ops  1MB each for Cassandra
+    
+3. Effect of Row cache Hit
+    consistency level is quorum
+    read for different cache hit ratio
+
+4. Erasure coding timings
+
+
+
+
+Exp (Benchmarking of KV operations)
+latency comparison for read/write/scan/update
+
+Exp (Performance breakdown)
+average latency of each step (log,memtable,cache,sstable etc) for processing
+
+Exp (Impact of object sizes)
+Effect of KV size on read/write latency
+
+Exp (Impact of coding parameters)
+on storage size and latency
+
+Exp (Impact of number of clients)
+on throughput

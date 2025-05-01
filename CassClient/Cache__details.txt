@@ -1,0 +1,6 @@
+Total reqs:1
+Total read:1  100 %
+Total update:0  0 %
+cache  hit:0  0 %
+cache Miss:0  0 %
+misread:1

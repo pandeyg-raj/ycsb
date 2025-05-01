@@ -7,7 +7,7 @@ void drop_keyspace(const char* keyspace) {
     CassSession* session = cass_session_new();
 
     // Set contact point (change IP if necessary)
-    cass_cluster_set_contact_points(cluster, "10.158.34.27");
+    cass_cluster_set_contact_points(cluster, "10.10.1.2");
 
     // Connect to cluster
     CassFuture* connect_future = cass_session_connect(session, cluster);

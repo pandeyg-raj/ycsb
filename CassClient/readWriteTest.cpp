@@ -6,19 +6,18 @@ std::ofstream outfileCacheCombine;
 
 int main(int argc,char** argv) {
   
-    int totalElement = 4;
-    bool isTracingOn = 1;
-    float ob_size_mb = 1;
-    bool isECObject =0;
+    int totalElement = 20;
+    bool isTracingOn = 0;
+    float ob_size_mb = 0.01;
+    bool isECObject = 1;
 
     // Initialize the Cassandra driver
     CassCluster* cluster = cass_cluster_new();
-    cass_cluster_set_contact_points(cluster, "10.158.34.27");
-    cass_cluster_set_whitelist_filtering(cluster, "10.158.34.27");
+    cass_cluster_set_contact_points(cluster, "10.10.1.2");
+    cass_cluster_set_whitelist_filtering(cluster, "10.10.1.2");
     CassSession* session = cass_session_new();
 
-    // Set contact points (Cassandra node IP address)
-
+    
     // Connect to the Cassandra cluster
     CassFuture* connect_future = cass_session_connect(session, cluster);
     cass_future_wait(connect_future);
@@ -51,18 +50,32 @@ int main(int argc,char** argv) {
 
         
         for(int i=0;i<totalElement;i++)
-        //for(int i=15;i<16;i++)
         {
             std::string readResult = read_large_object_by_key(session, i,i,clientTime,serverTime,teaceID,isTracingOn);
             
             if(readResult.compare(create_large_object(ob_size_mb,i)) !=0) //std::to_string(i)+ "someobject") !=0)
             {
-                std::cout<<"NOT :" <<i<<" Time:" <<clientTime<<" string not equals, Got: ";//<<readResult<<std::endl;//" Expected: "<<std::to_string(i)+ "someobject"<<std::endl;    
+                std::cout<<"NOT :" <<i<<" Time:" <<clientTime<<" string not equals, \nGot:"<<readResult.length()<<"."<<std::endl<<"Exp:"<<create_large_object(ob_size_mb,i).length()<<"."<<std::endl;    
                 return-1;
             }
             else
             {
                 std::cout<<"YES :"<<i<<" Time:" <<clientTime<<"tracing "<<teaceID<<std::endl;//" string equals, Got: "<<readResult<<" Expected: "<<std::to_string(i)+ "someobject"<<std::endl;
+            }
+    
+        }
+        for(int i=0;i<totalElement;i++)
+        {
+            std::string readResult = read_large_object_by_key(session, i,i,clientTime,serverTime,teaceID,isTracingOn);
+            
+            if(readResult.compare(create_large_object(ob_size_mb,i)) !=0) //std::to_string(i)+ "someobject") !=0)
+            {
+                std::cout<<"NOT :" <<i<<" Time:" <<clientTime<<" string not equals, \nGot:"<<readResult.length()<<"."<<std::endl<<"Exp:"<<create_large_object(ob_size_mb,i).length()<<"."<<std::endl;    
+                return-1;
+            }
+            else
+            {
+                std::cout<<"YES :"<<i<<" Time:" <<clientTime<<"    tracing "<<teaceID<<std::endl;//" string equals, Got: "<<readResult<<" Expected: "<<std::to_string(i)+ "someobject"<<std::endl;
             }
     
         }

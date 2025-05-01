@@ -14,14 +14,14 @@ int main(int argc,char** argv) {
     float ob_size_mb = 0.38;       
     
    // int Total_starting_Data = 40000;     // total data in db before read/update
-    int Total_starting_Data = 95000;
+    int Total_starting_Data = 100;
     int ShouldInsertStartingData = 0;
     int ShouldReadData = 1;
     int startingIndexInsertion = 0;
 
 
-    bool isTracingOn = 1;
-    int TotalOp = 100000;     // total read+update operations
+    bool isTracingOn = 0;
+    int TotalOp = 1;     // total read+update operations
     
     int readPercent = 100;
     //int cacheTotal =  8192;  // total object that should be target for read aka read heavy objects
@@ -57,8 +57,8 @@ int main(int argc,char** argv) {
     CassSession* session = cass_session_new();
 
     // Set contact points (Cassandra node IP address)
-    cass_cluster_set_contact_points(cluster, "10.158.34.27");
-    cass_cluster_set_whitelist_filtering(cluster, "10.158.34.27");
+    cass_cluster_set_contact_points(cluster, "10.10.1.2");
+    cass_cluster_set_whitelist_filtering(cluster, "10.10.1.2");
 
     // Connect to the Cassandra cluster
     CassFuture* connect_future = cass_session_connect(session, cluster);

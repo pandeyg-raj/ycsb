@@ -1,5 +1,7 @@
 #ignore data and result
 *.data
+*.csv
+/CassClient/.csv
 
 # ignore compiled byte code
 target

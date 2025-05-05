@@ -116,7 +116,7 @@ void query_system_trace_duration(CassSession* session, const char* tracing_id,ca
 // Function to insert a large object into the Cassandra table
 void insert_large_object(CassSession* session, int key, const std::string& data) {
     // Insert query
-    const char* insert_query = "INSERT INTO raj.rajt (field0, data) VALUES (?, ?);";
+    const char* insert_query = "INSERT INTO raj.rajt (id, field0) VALUES (?, ?);";
 
     // Create a statement
     CassStatement* statement = cass_statement_new(insert_query, 2);
@@ -217,7 +217,7 @@ void query_system_trace_Details_IsCacheHit(CassSession* session, const char* tra
 // also sets Total time taken based on client and server using "tracing feature"
 std::string read_large_object_by_key(CassSession* session, int key,int index,int64_t& Client_Duration_us,int64_t& Server_Duration_us,std::string& traceID,bool isTracingOn ) {
     // Select query with a placeholder for the key
-    const char* select_query = "SELECT field0, data FROM raj.rajt WHERE field0 = ?;";
+    const char* select_query = "SELECT id, field0 FROM raj.rajt WHERE id = ?;";
 
     // Create a statement
     CassStatement* statement = cass_statement_new(select_query, 1);
@@ -268,10 +268,10 @@ std::string read_large_object_by_key(CassSession* session, int key,int index,int
 
             // Get the key (id)
             int32_t id;
-            cass_value_get_int32(cass_row_get_column_by_name(row, "field0"), &id);
+            cass_value_get_int32(cass_row_get_column_by_name(row, "id"), &id);
 
             // Get the data (string)
-            cass_value_get_string(cass_row_get_column_by_name(row, "data"), &data, &data_size);
+            cass_value_get_string(cass_row_get_column_by_name(row, "field0"), &data, &data_size);
             finalresult =  std::string(data, data_size);
             //std::cout << "Read object with key " << id << " and size " << data_size << " bytes " << std::endl;
             
@@ -339,9 +339,9 @@ void create_keyspace_and_table(CassSession* session) {
 
     const char* create_table_query =
         "CREATE TABLE IF NOT EXISTS raj.rajt ("
-        "field0 int,"
-        "data text,"
-        "PRIMARY KEY (field0))" 
+        "id int,"
+        "field0 text,"
+        "PRIMARY KEY (id))" 
         "WITH caching = { 'keys' : 'NONE', 'rows_per_partition' : '1' } AND compression = { 'enabled' : false } AND read_repair='NONE';";
 
     // Create keyspace
@@ -380,14 +380,16 @@ void create_keyspace_and_table(CassSession* session) {
 
 // Function to update a value for a specific integer key in a table
 void update_value(CassSession* session, int key, const std::string& new_value) {
-    const char* query = "UPDATE raj.rajt SET data = ? WHERE field0 = ?";
-    
+    const char* query = "UPDATE raj.rajt SET field0 = ? WHERE id = ?";
     
     // Bind the parameters
     CassStatement* statement = cass_statement_new(query,2);
-    cass_statement_bind_string(statement, 0, new_value.c_str());  // Bind new value
+      // Bind the string data
+    cass_statement_bind_string_n(statement, 0, &new_value[0],new_value.size());
+
     cass_statement_bind_int32(statement, 1, key);  // Bind key as integer
 
+    std::cout<< "value "<<new_value.c_str();
     // Execute the statement
     CassFuture* result_future = cass_session_execute(session, statement);
     cass_future_wait(result_future);

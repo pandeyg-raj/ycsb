@@ -1,11 +1,5 @@
 # Apache Cassandra 2.x CQL binding
 
-Binding for [Apache Cassandra](http://cassandra.apache.org), using the CQL API
-via the [DataStax
-driver](http://docs.datastax.com/en/developer/java-driver/2.1/java-driver/whatsNew2.html).
-
-To run against the (deprecated) Cassandra Thrift API, use the `cassandra-10` binding.
-
 ## Creating a table for use with YCSB
 
 For keyspace `ycsb`, table `usertable`:
@@ -26,7 +20,12 @@ For keyspace `ycsb`, table `usertable`:
         field9 varchar)
         WITH caching = { 'keys' : 'NONE', 'rows_per_partition' : '1'} AND compression = { 'enabled' : false };
 
-**Note that `replication_factor` and consistency levels (below) will affect performance.**
+
+bin/ycsb.sh load cassandra-cql -s -P electworkload -threads 8
+bin/ycsb.sh run cassandra-cql -s -P electworkload -threads 8
+
+mvn clean package -Psource-run
+
 
 ## Cassandra Configuration Parameters
 

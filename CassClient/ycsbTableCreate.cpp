@@ -14,7 +14,7 @@ void ycsb_create_keyspace_and_table(CassSession* session) {
     const char* create_keyspace_query =
         "CREATE KEYSPACE IF NOT EXISTS ycsb WITH replication = {"
         "'class': 'SimpleStrategy', 'replication_factor': '5' }"
-        "AND DURABLE_WRITES = true;";
+        "AND DURABLE_WRITES = false;";
 
     const char* create_table_query =
         "CREATE TABLE IF NOT EXISTS ycsb.usertable ("
@@ -72,8 +72,8 @@ int main(int argc,char  ** argv) {
     CassSession* session = cass_session_new();
 
     // Set contact points (Cassandra node IP address)
-    cass_cluster_set_contact_points(cluster, "10.158.34.27");
-    cass_cluster_set_whitelist_filtering(cluster, "10.158.34.27");
+    cass_cluster_set_contact_points(cluster, "10.10.1.2");
+    cass_cluster_set_whitelist_filtering(cluster, "10.10.1.2");
 
     // Connect to the Cassandra cluster
     CassFuture* connect_future = cass_session_connect(session, cluster);

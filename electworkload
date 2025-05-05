@@ -5,14 +5,20 @@ cassandra.readconsistencylevel=QUORUM
 cassandra.writeconsistencylevel=ALL
 hosts=10.10.1.2
 
-recordcount=1000000
+# The size of each field (in bytes)
+fieldlength=10000
 
+recordcount=10000000
 operationcount=5000000
 
-# The size of each field (in bytes)
-fieldlength=100000
 
-measurement.raw.output_file = /mydata/ycsb/9GBLimRead512mbZip.data
+#measurement.raw.output_file = /mydata/ycsb/ecRead1KB50Per.data
+measurement.raw.output_file = /mydata/ycsb/ecLoad10KB.data
+# The distribution of requests across the keyspace
+requestdistribution=zipfian
+readproportion=1
+updateproportion=0
+insertproportion=0
 
 # The number of insertions to do, if different from recordcount.
 # Used with insertstart to grow an existing table.
@@ -33,18 +39,7 @@ writeallfields=true
 # The distribution used to choose the length of a field
 
 fieldlengthdistribution=constant
-#fieldlengthdistribution=normal
-#fieldlengthdistribution=uniform
-#fieldlengthdistribution=zipfian
 
-# What proportion of operations are reads
-readproportion=1
-
-# What proportion of operations are updates
-updateproportion=0
-
-# What proportion of operations are inserts
-insertproportion=0
 
 # What proportion of operations read then modify a record
 readmodifywriteproportion=0

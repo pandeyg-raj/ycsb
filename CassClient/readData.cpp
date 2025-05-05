@@ -11,12 +11,12 @@ std::ofstream details;
 int main(int argc,char** argv) {
     
     bool isECObject = 1;
-    float ob_size_mb = 0.38;       
+    float ob_size_mb = 1;       
     
    // int Total_starting_Data = 40000;     // total data in db before read/update
-    int Total_starting_Data = 100;
-    int ShouldInsertStartingData = 0;
-    int ShouldReadData = 1;
+    int Total_starting_Data = 8000;
+    int ShouldInsertStartingData = 1;
+    int ShouldReadData = 0;
     int startingIndexInsertion = 0;
 
 

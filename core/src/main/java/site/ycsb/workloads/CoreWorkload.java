@@ -858,7 +858,8 @@ public class CoreWorkload extends Workload {
       values = buildSingleValue(keyname);
     }
 
-    db.update(table, keyname, values);
+    //db.update(table, keyname, values);
+    db.insert(table, keyname, values);
   }
 
   public void doTransactionInsert(DB db) {

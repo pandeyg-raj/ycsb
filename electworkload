@@ -11,14 +11,12 @@ fieldlength=10000
 recordcount=10000000
 operationcount=5000000
 
-
-#measurement.raw.output_file = /mydata/ycsb/ecRead1KB50Per.data
 measurement.raw.output_file = /mydata/ycsb/ecLoad10KB.data
 # The distribution of requests across the keyspace
 requestdistribution=zipfian
 readproportion=1
 updateproportion=0
-insertproportion=0
+
 
 # The number of insertions to do, if different from recordcount.
 # Used with insertstart to grow an existing table.
@@ -65,11 +63,7 @@ requestdistribution=zipfian
 #requestdistribution=uniform
 #requestdistribution=latest
 
-# Percentage of data items that constitute the hot set
-hotspotdatafraction=0.2
 
-# Percentage of operations that access the hot set
-hotspotopnfraction=0.8
 
 # Maximum execution time in seconds
 #maxexecutiontime= 

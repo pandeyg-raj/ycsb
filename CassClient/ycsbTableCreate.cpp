@@ -14,21 +14,12 @@ void ycsb_create_keyspace_and_table(CassSession* session) {
     const char* create_keyspace_query =
         "CREATE KEYSPACE IF NOT EXISTS ycsb WITH replication = {"
         "'class': 'SimpleStrategy', 'replication_factor': '5' }"
-        "AND DURABLE_WRITES = false;";
+        "AND DURABLE_WRITES = true;";
 
     const char* create_table_query =
         "CREATE TABLE IF NOT EXISTS ycsb.usertable ("
         "y_id varchar,"
         "field0 varchar,"
-        "field1 varchar,"
-        "field2 varchar,"
-        "field3 varchar,"
-        "field4 varchar,"
-        "field5 varchar,"
-        "field6 varchar,"
-        "field7 varchar,"
-        "field8 varchar,"
-        "field9 varchar,"
         "PRIMARY KEY (y_id))" 
         "WITH caching = { 'keys' : 'NONE', 'rows_per_partition' : '1' } AND compression = { 'enabled' : false } AND read_repair='NONE';";
 

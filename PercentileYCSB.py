@@ -6,16 +6,21 @@ from itertools import accumulate
 from pathlib import Path
 
 base_path = Path(__file__).parent
-file_path = (base_path / "./ecRead4GB.data").resolve()
-df = pd.read_csv(file_path,comment='#',skipinitialspace=True)
+file_path = (base_path / "./Z_EcRead10KB50P_ThPool.data").resolve()
+df = pd.read_csv(file_path,comment='#',skipinitialspace=True,dtype={"op": "string","timestamp_ms":"string","client_lat_us": int})
 
 #changing to ms from us
-print("mean is ",  round(df.client_lat_us.mean()/1000,2))  # Same as df['field_A'].mean())
-print("median is ",   round(df.client_lat_us.median()/1000,2) )
-print("90th percentile is ",  round(df.client_lat_us.quantile(0.90)/1000,3) )  # 90th percentile
-print("95th percentile is ",  round(df.client_lat_us.quantile(0.95)/1000,3) )  # 95th percentile
-print("96th percentile is ",  round(df.client_lat_us.quantile(0.96)/1000,3) )  # 95th percentile
-print("97th percentile is ",  round(df.client_lat_us.quantile(0.97)/1000,3) )  # 95th percentile
-print("98th percentile is ",  round(df.client_lat_us.quantile(0.98)/1000,3) )  # 95th percentile
-print("99th percentile is ",  round(df.client_lat_us.quantile(0.99)/1000,3) )  # 99th percentile
-print("done")
+print("mean is overall",  round(df.client_lat_us.mean()))  # Same as df['field_A'].mean())
+print("mean is ",  round(df.groupby('op').client_lat_us.mean()))  # Same as df['field_A'].mean())
+print("")
+
+print("90th overall percentile is ",  round(df.client_lat_us.quantile(0.90)) )  # 90th percentile
+print("90th percentile is ",  round(df.groupby('op').client_lat_us.quantile(0.90)) )  # 90th percentile
+print("")
+
+print("95th overall percentile is ",  round(df.client_lat_us.quantile(0.95)) )  # 95th percentile
+print("95th percentile is ",  round(df.groupby('op').client_lat_us.quantile(0.95)) )  # 95th percentile
+print("")
+
+print("99th overall percentile is ",  round(df.client_lat_us.quantile(0.99)) )  # 99th percentile
+print("99th percentile is ",  round(df.groupby('op').client_lat_us.quantile(0.99)) )  # 99th percentile

@@ -21,7 +21,7 @@ void ycsb_create_keyspace_and_table(CassSession* session) {
         "y_id varchar,"
         "field0 varchar,"
         "PRIMARY KEY (y_id))" 
-        "WITH caching = { 'keys' : 'NONE', 'rows_per_partition' : '1' } AND compression = { 'enabled' : false } AND read_repair='NONE';";
+        "compression = { 'enabled' : false } AND read_repair='NONE';";
 
     // Create keyspace
     CassStatement* statement = cass_statement_new(create_keyspace_query, 0);

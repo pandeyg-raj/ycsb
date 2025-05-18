@@ -29,7 +29,7 @@ insertstart=0
 fieldcount=1
 
 # Should read all fields
-readallfields=true
+readallfields=false
 
 # Should write all fields on update
 writeallfields=true

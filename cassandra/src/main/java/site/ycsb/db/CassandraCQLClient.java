@@ -32,6 +32,10 @@ import com.datastax.driver.core.querybuilder.Insert;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.datastax.driver.core.querybuilder.Select;
 import com.datastax.driver.core.querybuilder.Update;
+import com.datastax.driver.core.policies.WhiteListPolicy;
+import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
+import java.net.InetSocketAddress;
+import java.util.Collections;
 import site.ycsb.ByteArrayByteIterator;
 import site.ycsb.ByteIterator;
 import site.ycsb.DB;
@@ -192,7 +196,13 @@ public static final String USE_SSL_CONNECTION = "cassandra.useSSL";
           cluster = clusterBuilder.build();
         } else {
           cluster = Cluster.builder().withPort(Integer.valueOf(port))
-              .addContactPoints(hosts).build();
+              .addContactPoints(hosts)
+              //.withLoadBalancingPolicy(
+              //      new WhiteListPolicy(
+              //      DCAwareRoundRobinPolicy.builder().build(),
+              //      Collections.singletonList(new InetSocketAddress(hosts[0], 9042))
+             //       ))
+              .build();
         }
 
         String maxConnections = getProperties().getProperty(

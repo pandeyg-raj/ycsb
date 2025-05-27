@@ -1,0 +1,54 @@
+[READ], Average, 3821.5443008
+[READ], Min, 1439
+[READ], Max, 253584
+[READ], p1, 2087
+[READ], p5, 2395
+[READ], p50, 3616
+[READ], p90, 4904
+[READ], p95, 5282
+[READ], p99, 6040
+[READ], p99.9, 35172
+[READ], p99.99, 98308
+
+10gb Resident Pages: 305705/8165397  1G/31G  3.74%
+MINFL       MAJFL       MINFL       MAJFL           diffMin     diffMaj     total       %minHit
+2278501     228         3857655     6639438         1579154     6639210     8218364     19.21
+
+10gb Resident Pages: 304893/8163944  1G/31G  3.73%
+MINFL   MAJFL       MINFL      MAJFL
+2287911   214       3858898     6641170
+
+10gb Resident Pages: 299899/8163615  1G/31G  3.67%
+MINFL   MAJFL       MINFL         MAJFL
+2299337   194       3863963     6648985
+
+10gb Resident Pages: 298392/8163631  1G/31G  3.66%
+MINFL   MAJFL       MINFL      MAJFL
+2298748   176       3877062     6652597
+
+10gb Resident Pages: 306660/8163971  1G/31G  3.76%
+MINFL   MAJFL       MINFL      MAJFL
+2285594   215       3859773     6639819
+
+============================================================
+[READ], Average, 3949.8011018
+[READ], Min, 1504
+[READ], Max, 122634
+[READ], p1, 2174
+[READ], p5, 2497
+[READ], p50, 3767
+[READ], p90, 5019
+[READ], p95, 5370
+[READ], p99, 6041
+[READ], p99.9, 34289
+[READ], p99.99, 107935
+[READ], Return=OK, 5000000
+
+
+15gb Resident Pages: 1604563/8165397  6G/31G  19.7%
+MINFL       MAJFL       MINFL       MAJFL           diffmin     diffmaj     total       %minHit
+2293473     215         3779904     5175571         1486431     3779689     5266120     28.2
+
+15gb 
+MINFL   MAJFL       MINFL      MAJFL
+

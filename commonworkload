@@ -1,0 +1,28 @@
+
+keylength=24
+cassandra.isEC=true
+cassandra.readconsistencylevel=ALL
+cassandra.writeconsistencylevel=ALL
+hosts=10.10.1.2
+operationcount=10
+#poisson_lambda=100.0
+#measurement.raw.output_file = /mydata/ycsb/OScacheRepRead10KB_64GB_zip.data
+requestdistribution=zipfian
+# The offset of the first insertion
+insertstart=0
+fieldcount=1
+readallfields=false
+writeallfields=false
+workload=site.ycsb.workloads.CoreWorkload
+
+# The distribution of requests across the keyspace
+#requestdistribution=uniform
+#requestdistribution=latest
+# The name of the database table to run queries against
+table=usertable
+measurementtype=raw
+#measurement.raw.output_file = /home/raj/ycsb/ecLoadResult
+core_workload_insertion_retry_limit = 10
+# the following number controls the interval between retries (in seconds):
+core_workload_insertion_retry_interval = 5
+updateproportion=0

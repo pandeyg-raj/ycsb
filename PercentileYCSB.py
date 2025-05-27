@@ -4,7 +4,7 @@ import numpy as np
 from itertools import accumulate
 from pathlib import Path
 base_path = Path(__file__).parent
-file_path = (base_path / "ycsb_results2/ec_iter_1Run10000Bytes_read95run.scr").resolve()
+file_path = (base_path / "./FinalExps/ycsb_results1KB/ec_iter_5Run1000Bytes_read50run.scr").resolve()
 x =0;
 def parse_raw_ycsb(file_path):
     read_latencies = []

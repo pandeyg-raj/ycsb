@@ -121,7 +121,10 @@ public class CassandraCQLClient extends DB {
   public static final String ISEC_PROPERTY = "cassandra.isEC";
   public static final String ISEC_PROPERTY_DEFAULT = "false";
 
-public static final String USE_SSL_CONNECTION = "cassandra.useSSL";
+  public static final String EC_COLUMN_NAME_PROPERTY = "ECCOLUMN";
+  public static final String EC_COLUMN_NAME_PROPERTY_DEFAULT = "field0";
+  
+  public static final String USE_SSL_CONNECTION = "cassandra.useSSL";
   private static final String DEFAULT_USE_SSL_CONNECTION = "false";
 
   /**
@@ -135,7 +138,8 @@ public static final String USE_SSL_CONNECTION = "cassandra.useSSL";
   private static boolean trace = false;
 
   private static boolean isEC = false;
-  
+
+  private static String ECCOLUMN = "field0";
   /**
    * Initialize any state for this DB. Called once per DB instance; there is one
    * DB instance per client thread.
@@ -161,7 +165,7 @@ public static final String USE_SSL_CONNECTION = "cassandra.useSSL";
             Boolean.parseBoolean(getProperties().getProperty("debug", "false"));
         trace = Boolean.valueOf(getProperties().getProperty(TRACING_PROPERTY, TRACING_PROPERTY_DEFAULT));
         isEC = Boolean.valueOf(getProperties().getProperty(ISEC_PROPERTY, ISEC_PROPERTY_DEFAULT));
-
+        ECCOLUMN = getProperties().getProperty(EC_COLUMN_NAME_PROPERTY,EC_COLUMN_NAME_PROPERTY_DEFAULT);
         String host = getProperties().getProperty(HOSTS_PROPERTY);
         if (host == null) {
           throw new DBException(String.format(
@@ -604,7 +608,7 @@ public static final String USE_SSL_CONNECTION = "cassandra.useSSL";
       // Add fields
       ColumnDefinitions vars = stmt.getVariables();
       for (int i = 1; i < vars.size(); i++) {
-        if(isEC){
+        if(isEC && vars.getName(i).equals(ECCOLUMN)){
           boundStmt.setString(i, '\u0000'+ values.get(vars.getName(i)).toString());
         }
         else{

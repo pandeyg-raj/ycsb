@@ -197,6 +197,9 @@ public class CoreWorkload extends Workload {
   public static final String ISEC_PROPERTY = "cassandra.isEC";
   public static final String ISEC_PROPERTY_DEFAULT = "false";
 
+  public static final String EC_COLUMN_NAME_PROPERTY = "ECCOLUMN";
+  public static final String EC_COLUMN_NAME_PROPERTY_DEFAULT = "field0";
+   
   /**
    * Set to true if want to check correctness of reads. Must also
    * be set to true during loading phase to function.
@@ -204,7 +207,7 @@ public class CoreWorkload extends Workload {
   private boolean dataintegrity;
   private boolean isEC;
   private double poisson_lambda;
-
+  private  String ECCOLUMN = "field0";
   /**
    * The name of the property for the proportion of transactions that are reads.
    */
@@ -475,6 +478,8 @@ public class CoreWorkload extends Workload {
 
     isEC = Boolean.parseBoolean(
         p.getProperty(ISEC_PROPERTY, ISEC_PROPERTY_DEFAULT));
+    
+    ECCOLUMN = p.getProperty(EC_COLUMN_NAME_PROPERTY, EC_COLUMN_NAME_PROPERTY_DEFAULT);
 
     // Confirm that fieldlengthgenerator returns a constant if data
     // integrity check requested.
@@ -712,7 +717,7 @@ public class CoreWorkload extends Workload {
         //System.out.println("\nkey "+key+ " got      value:"+ gotVal);
         
         boolean isequal = false;
-        if(isEC){
+        if(isEC && entry.getKey().equals(ECCOLUMN)){
           isequal = expectedVal.substring(0,gotVal.length()).equals(gotVal.substring(0,gotVal.length())); 
         }
         else{

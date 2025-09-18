@@ -6,8 +6,8 @@ WARMUP_OPS=5000000
 MEASURE_OPS=5000000
 REPEAT=5
 
-FIELD_LENGTH=10000
-RECORD_COUNT=10000000
+FIELD_LENGTH=30000
+RECORD_COUNT=3300000
 
 declare -A WORKLOADS
 
@@ -25,9 +25,9 @@ read WTHREADS
 echo "How Many Read threads"
 read THREADS
 
-mkdir -p Detailed_Breakdown_10KB
+mkdir -p Tail_Lat_30KB
 
-OUT_DIR=Detailed_Breakdown_10KB
+OUT_DIR=Tail_Lat_30KB
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 
 # Load phase once
@@ -43,7 +43,7 @@ echo "Load phase: Done $RECORD_COUNT records of size ${FIELD_LENGTH} bytes"
 
 # collect data from all replicas and store in a file
 
-breakdownresult="Detailed_Breakdown_10KB_${EXP_LABEL}_summary.txt"
+breakdownresult="Tail_Lat_30KB_${EXP_LABEL}_summary.txt"
 
 touch "$breakdownresult"
 

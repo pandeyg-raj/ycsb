@@ -1,52 +1,76 @@
 #!/bin/bash
 
+# Define paths and variables
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-WARMUP_OPS=5000000
-MEASURE_OPS=5000000
-REPEAT=5
-
-FIELD_LENGTH=10000
-RECORD_COUNT=10000000
+FIELD_LENGTH=10
+RECORD_COUNT=10000000000  # You can change this to your total record count
 
 declare -A WORKLOADS
-
-WORKLOAD_LABELS=("read100" "read95" "read50")
-READ_PROPORTIONS=("readproportion=1 -p insertproportion=0" \
-                "readproportion=0.95 -p insertproportion=0.05" \
-                "readproportion=0.5 -p insertproportion=0.5")
-
-echo "Is this ec or rep"
+echo "Is this EC or Rep?"
 read EXP_LABEL
-
-echo "How Many Write threads"
+echo "How many Write threads?"
 read WTHREADS
 
 echo "How Many Read threads"
 read THREADS
 
-mkdir -p Detailed_Breakdown_10KB
 
-OUT_DIR=Detailed_Breakdown_10KB
+mkdir -p 10Bytes_object
+OUT_DIR="10Bytes_object"
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 
-# Load phase once
-echo "Load phase: Loading $RECORD_COUNT records of size ${FIELD_LENGTH} bytes"
-$YCSB_DIR load $DB -threads $WTHREADS \
--p recordcount=${RECORD_COUNT} \
--p fieldlength=${FIELD_LENGTH} \
--p measurement.raw.output_file="$RAW_FILE" \
--P commonworkload \
--s >> "${OUT_DIR}/${EXP_LABEL}_run${FIELD_LENGTH}Bytes.log" 2>&1
-
-echo "Load phase: Done $RECORD_COUNT records of size ${FIELD_LENGTH} bytes"
-
-# collect data from all replicas and store in a file
-
-breakdownresult="Detailed_Breakdown_10KB_${EXP_LABEL}_summary.txt"
-
+breakdownresult="10Bytes_${EXP_LABEL}_summary.txt"
 touch "$breakdownresult"
 
+# Define batch size 
+BATCH_SIZE=10000000
+
+# Calculate number of batches and remainder
+NUM_BATCHES=$((RECORD_COUNT / BATCH_SIZE))
+REMAINDER=$((RECORD_COUNT % BATCH_SIZE))
+
+
+echo "Total Records: $RECORD_COUNT"
+echo "Batch Size: $BATCH_SIZE"
+echo "Number of Batches: $NUM_BATCHES"
+echo "Remainder: $REMAINDER"
+
+
+# Load phase in chunks
+for ((batch=0; batch<=NUM_BATCHES; batch++))
+do
+    # Calculate start and end keys for each batch
+    START=$((batch * BATCH_SIZE))
+    
+    # If it's the last batch and there are fewer records left, use the remainder
+    if [ $batch -eq $NUM_BATCHES ] && [ $REMAINDER -ne 0 ]; then
+        END=$((START + REMAINDER - 1))
+        RECORD_COUNT=$REMAINDER
+    else
+        END=$((START + BATCH_SIZE - 1))
+        RECORD_COUNT=$BATCH_SIZE
+    fi
+    
+    # Print the batch details
+    echo "Running YCSB Load: Batch $((batch + 1))"
+    echo "Start key: $START, End key: $END, Records: $RECORD_COUNT"
+
+    # Run YCSB load for the current batch
+    $YCSB_DIR load $DB -threads $WTHREADS \
+    -p recordcount=$RECORD_COUNT \
+    -p fieldlength=$FIELD_LENGTH \
+    -p start=$START \
+    -p end=$END \
+    -p measurement.raw.output_file="$RAW_FILE" \
+    -P commonworkload \
+    -s >> "${OUT_DIR}/${EXP_LABEL}_run${FIELD_LENGTH}Bytes_batch$((batch + 1)).log" 2>&1
+
+    # Optional: Sleep between batches if needed to avoid overwhelming the system
+     sleep 10
+done
+
+echo "Load phase: Done inserting $RECORD_COUNT records of size ${FIELD_LENGTH} bytes"
 echo "Insert done collecting data" >> "$breakdownresult"
 
 ssh rzp5412@10.10.1.2 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
@@ -54,6 +78,21 @@ ssh rzp5412@10.10.1.3 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keysp
 ssh rzp5412@10.10.1.4 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
 ssh rzp5412@10.10.1.5 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
 ssh rzp5412@10.10.1.6 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
+
+sleep 10
+
+
+WARMUP_OPS=5000000
+MEASURE_OPS=5000000
+REPEAT=5
+FIELD_LENGTH=10
+RECORD_COUNT=10000000000
+
+WORKLOAD_LABELS=("read100" "read95" "read50")
+READ_PROPORTIONS=("readproportion=1 -p insertproportion=0" \
+                "readproportion=0.95 -p insertproportion=0.05" \
+                "readproportion=0.5 -p insertproportion=0.5")
+
 
 
 # Warmup phase once mix workload
@@ -107,6 +146,7 @@ ssh rzp5412@10.10.1.3 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keysp
 ssh rzp5412@10.10.1.4 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
 ssh rzp5412@10.10.1.5 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
 ssh rzp5412@10.10.1.6 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
+
 
 done
 echo "16 threads"

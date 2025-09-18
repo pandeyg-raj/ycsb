@@ -5,8 +5,9 @@ DB=cassandra-cql
 WARMUP_OPS=5000000
 MEASURE_OPS=5000000
 REPEAT=5
-FIELD_LENGTH=100000
-RECORD_COUNT=1000000
+
+FIELD_LENGTH=45
+RECORD_COUNT=2147483647
 
 declare -A WORKLOADS
 
@@ -24,9 +25,9 @@ read WTHREADS
 echo "How Many Read threads"
 read THREADS
 
-mkdir -p ycsb_results100KB
+mkdir -p new_45B
 
-OUT_DIR=ycsb_results100KB
+OUT_DIR=new_45B
 
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 

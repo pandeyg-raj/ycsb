@@ -6,8 +6,8 @@ WARMUP_OPS=5000000
 MEASURE_OPS=5000000
 REPEAT=5
 
-FIELD_LENGTH=10000
-RECORD_COUNT=10000000
+FIELD_LENGTH=30000
+RECORD_COUNT=1000000
 
 declare -A WORKLOADS
 
@@ -25,9 +25,9 @@ read WTHREADS
 echo "How Many Read threads"
 read THREADS
 
-mkdir -p Detailed_Breakdown_10KB
+mkdir -p FindNetwork_No_RowCache_10KB_${EXP_LABEL}_${FIELD_LENGTH}
 
-OUT_DIR=Detailed_Breakdown_10KB
+OUT_DIR=FindNetwork_No_RowCache_10KB_${EXP_LABEL}_${FIELD_LENGTH}
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 
 # Load phase once
@@ -43,7 +43,7 @@ echo "Load phase: Done $RECORD_COUNT records of size ${FIELD_LENGTH} bytes"
 
 # collect data from all replicas and store in a file
 
-breakdownresult="Detailed_Breakdown_10KB_${EXP_LABEL}_summary.txt"
+breakdownresult="FindNetwork_No_RowCache_${FIELD_LENGTH}KB_${EXP_LABEL}_summary.txt"
 
 touch "$breakdownresult"
 
@@ -62,7 +62,7 @@ RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Warmup${FIELD_LENGTH}Bytes_run.scr"
 
 $YCSB_DIR run $DB -threads $THREADS \
 -p operationcount=$WARMUP_OPS \
--p readproportion=0.5 -p insertproportion=0.5 \
+-p readproportion=1.0 -p insertproportion=0.0 \
 -p recordcount=${RECORD_COUNT} \
 -p measurement.raw.output_file="$RAW_FILE" \
 -P commonworkload \

@@ -10,8 +10,9 @@ RECORD_COUNT=6500000
 
 declare -A WORKLOADS
 
-WORKLOAD_LABELS=("read100")
-READ_PROPORTIONS=("readproportion=1.0 -p insertproportion=0.0")
+WORKLOAD_LABELS=("read100" "read50")
+READ_PROPORTIONS=("readproportion=1 -p insertproportion=0" \
+                  "readproportion=0.5 -p insertproportion=0.5")
 
 echo "Is this ec or rep"
 read EXP_LABEL
@@ -157,4 +158,3 @@ for i in "${!WORKLOAD_LABELS[@]}"; do
   done
 
 done
-echo "16 threads"

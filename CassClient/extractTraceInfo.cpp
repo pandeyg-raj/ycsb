@@ -9,8 +9,8 @@ std::ofstream details;
 
 int main(int argc,char** argv) {
     
-    std::string TraceOutputfilename = "rep_trace_output95.csv";
-    std::string TraceInputfilename = "rep_trace95.log";
+    std::string TraceOutputfilename = "ec_trace_output50.csv";
+    std::string TraceInputfilename = "ec_trace50.log";
     CassCluster* cluster = cass_cluster_new();
     CassSession* session = cass_session_new();
 

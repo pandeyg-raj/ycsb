@@ -575,8 +575,11 @@ public class CoreWorkload extends Workload {
     if (dataintegrity) {
       data = new StringByteIterator(buildDeterministicValue(key, fieldkey));
     } else {
-      // fill with random data
-      data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+        if (fieldkey.equals("field1")) {
+          data = new RandomByteIterator(1000);
+        } else {
+            data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+        }
     }
     value.put(fieldkey, data);
 
@@ -595,7 +598,11 @@ public class CoreWorkload extends Workload {
         data = new StringByteIterator(buildDeterministicValue(key, fieldkey));
       } else {
         // fill with random data
-        data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+        if (fieldkey.equals("field1")) {
+          data = new RandomByteIterator(1000);
+        } else {
+            data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+        }
       }
       values.put(fieldkey, data);
     }

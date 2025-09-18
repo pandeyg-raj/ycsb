@@ -7,7 +7,7 @@ hosts=10.10.1.2
 operationcount=10
 #poisson_lambda=100.0
 #measurement.raw.output_file = /mydata/ycsb/OScacheRepRead10KB_64GB_zip.data
-requestdistribution=uniform
+requestdistribution=zipfian
 # The offset of the first insertion
 insertstart=0
 fieldcount=1

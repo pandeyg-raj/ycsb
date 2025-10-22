@@ -16,7 +16,7 @@ READ_PROPORTIONS=("readproportion=1 -p insertproportion=0" \
                 "readproportion=0.95 -p insertproportion=0.05" \
                 "readproportion=0.5 -p insertproportion=0.5")
 
-echo "Is this ec or rep"
+echo "whats value of n and k ? provide without space with EC prefix eg EC62"
 read EXP_LABEL
 
 echo "How Many Write threads"
@@ -25,9 +25,9 @@ read WTHREADS
 echo "How Many Read threads"
 read THREADS
 
-mkdir -p Detailed_Breakdown_10KB
+mkdir -p ECparameter_10KB
 
-OUT_DIR=Detailed_Breakdown_10KB
+OUT_DIR=ECparameter_10KB
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 
 # Load phase once
@@ -43,7 +43,7 @@ echo "Load phase: Done $RECORD_COUNT records of size ${FIELD_LENGTH} bytes"
 
 # collect data from all replicas and store in a file
 
-breakdownresult="Detailed_Breakdown_10KB_${EXP_LABEL}_summary.txt"
+breakdownresult="ECparameter_10KB_${EXP_LABEL}_summary.txt"
 
 touch "$breakdownresult"
 

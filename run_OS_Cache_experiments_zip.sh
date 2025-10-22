@@ -25,9 +25,9 @@ read WTHREADS
 echo "How Many Read threads"
 read THREADS
 
-mkdir -p oscache28Zip
+mkdir -p oscache28ZipRep3way
 
-OUT_DIR=oscache28Zip
+OUT_DIR=oscache28ZipRep3way
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 
 # Load phase once

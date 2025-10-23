@@ -171,6 +171,20 @@ public class CoreWorkload extends Workload {
   protected boolean readallfieldsbyname;
 
   /**
+   * The name of the property for determining which field to read
+   */
+  public static final String READ_SPECIFIC_FIELD = "readSpecificField";
+  public static final String SPECIFIC_FIELD_INDEX = "specificFieldIndex";
+  
+  /**
+   * The default value for the readSpecificField property.
+   */
+  public static final String READ_SPECIFIC_FIELD_DEFAULT = "false";
+  public static final String SPECIFIC_FIELD_INDEX_DEFAULT = "0";
+
+  protected boolean readSpecificField;
+  protected int specificFieldIndex;
+  /**
    * The name of the property for deciding whether to write one field (false) or all fields (true)
    * of a record.
    */
@@ -470,6 +484,10 @@ public class CoreWorkload extends Workload {
         p.getProperty(READ_ALL_FIELDS_PROPERTY, READ_ALL_FIELDS_PROPERTY_DEFAULT));
     readallfieldsbyname = Boolean.parseBoolean(
         p.getProperty(READ_ALL_FIELDS_BY_NAME_PROPERTY, READ_ALL_FIELDS_BY_NAME_PROPERTY_DEFAULT));
+    readSpecificField = Boolean.parseBoolean(
+        p.getProperty(READ_SPECIFIC_FIELD, READ_SPECIFIC_FIELD_DEFAULT));
+    specificFieldIndex =
+        Integer.parseInt(p.getProperty(SPECIFIC_FIELD_INDEX, SPECIFIC_FIELD_INDEX_DEFAULT));
     writeallfields = Boolean.parseBoolean(
         p.getProperty(WRITE_ALL_FIELDS_PROPERTY, WRITE_ALL_FIELDS_PROPERTY_DEFAULT));
 
@@ -778,6 +796,21 @@ public class CoreWorkload extends Workload {
       fields = new HashSet<String>(fieldnames);
     }
 
+    if (readSpecificField)
+    {
+      fields = new HashSet<String>();
+
+       if (specificFieldIndex >= 0 && specificFieldIndex < fieldnames.size()) {
+            // Add the element at the specified index from fieldnames to fields
+            fields.add(fieldnames.get(specificFieldIndex));  // Adds "Email" to fields
+        } else {
+            System.out.println("specificFieldIndex out of bounds");
+            throw new IndexOutOfBoundsException("specificFieldIndex " + specificFieldIndex + " is out of bounds for the list.");
+        }
+
+        System.out.println("reading specificfield "+fields); 
+    }
+    
     HashMap<String, ByteIterator> cells = new HashMap<String, ByteIterator>();
     db.read(table, keyname, fields, cells);
     //System.out.println("reading key "+keyname);//+ " value: "+ sb.toString());

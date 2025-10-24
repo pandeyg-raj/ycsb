@@ -616,11 +616,7 @@ public class CoreWorkload extends Workload {
         data = new StringByteIterator(buildDeterministicValue(key, fieldkey));
       } else {
         // fill with random data
-        if (fieldkey.equals("field1")) {
-          data = new RandomByteIterator(1000);
-        } else {
-            data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
-        }
+        data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
       }
       values.put(fieldkey, data);
     }
@@ -788,7 +784,7 @@ public class CoreWorkload extends Workload {
     if (!readallfields) {
       // read a random field
       String fieldname = fieldnames.get(fieldchooser.nextValue().intValue());
-
+      //System.out.println("reading fieldname "+fieldname);
       fields = new HashSet<String>();
       fields.add(fieldname);
     } else if (dataintegrity || readallfieldsbyname) {
@@ -808,7 +804,7 @@ public class CoreWorkload extends Workload {
             throw new IndexOutOfBoundsException("specificFieldIndex " + specificFieldIndex + " is out of bounds for the list.");
         }
 
-        System.out.println("reading specificfield "+fields); 
+        // System.out.println("reading specificfield "+fields); 
     }
     
     HashMap<String, ByteIterator> cells = new HashMap<String, ByteIterator>();

@@ -3,8 +3,8 @@
 # Define paths and variables
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-FIELD_LENGTH=10
-RECORD_COUNT=10000000000  # You can change this to your total record count
+FIELD_LENGTH=5000000
+RECORD_COUNT=20000  # You can change this to your total record count
 
 declare -A WORKLOADS
 echo "Is this EC or Rep?"
@@ -16,15 +16,16 @@ echo "How Many Read threads"
 read THREADS
 
 
-mkdir -p 10Bytes_object
-OUT_DIR="10Bytes_object"
+mkdir -p 10MBytes_object
+OUT_DIR="10MBytes_object"
+
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 
-breakdownresult="10Bytes_${EXP_LABEL}_summary.txt"
+breakdownresult="10MBytes_${EXP_LABEL}_summary.txt"
 touch "$breakdownresult"
 
 # Define batch size 
-BATCH_SIZE=10000000
+BATCH_SIZE=10000
 
 # Calculate number of batches and remainder
 NUM_BATCHES=$((RECORD_COUNT / BATCH_SIZE))
@@ -38,30 +39,30 @@ echo "Remainder: $REMAINDER"
 
 
 # Load phase in chunks
-for ((batch=0; batch<=NUM_BATCHES; batch++))
+for ((batch=0; batch<NUM_BATCHES; batch++))
 do
     # Calculate start and end keys for each batch
     START=$((batch * BATCH_SIZE))
+    CURRENT_COUNT=$BATCH_SIZE
     
-    # If it's the last batch and there are fewer records left, use the remainder
     if [ $batch -eq $NUM_BATCHES ] && [ $REMAINDER -ne 0 ]; then
-        END=$((START + REMAINDER - 1))
-        RECORD_COUNT=$REMAINDER
+      END=$((START + REMAINDER - 1))
+      CURRENT_COUNT=$REMAINDER
     else
-        END=$((START + BATCH_SIZE - 1))
-        RECORD_COUNT=$BATCH_SIZE
+      END=$((START + BATCH_SIZE - 1))
+      CURRENT_COUNT=$BATCH_SIZE
     fi
+
     
     # Print the batch details
     echo "Running YCSB Load: Batch $((batch + 1))"
-    echo "Start key: $START, End key: $END, Records: $RECORD_COUNT"
+    echo "Start key: $START, End key: $END, Records: $CURRENT_COUNT"
 
     # Run YCSB load for the current batch
     $YCSB_DIR load $DB -threads $WTHREADS \
-    -p recordcount=$RECORD_COUNT \
+    -p recordcount=$CURRENT_COUNT \
     -p fieldlength=$FIELD_LENGTH \
-    -p start=$START \
-    -p end=$END \
+    -p insertstart=$START \
     -p measurement.raw.output_file="$RAW_FILE" \
     -P commonworkload \
     -s >> "${OUT_DIR}/${EXP_LABEL}_run${FIELD_LENGTH}Bytes_batch$((batch + 1)).log" 2>&1
@@ -82,11 +83,9 @@ ssh rzp5412@10.10.1.6 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keysp
 sleep 10
 
 
-WARMUP_OPS=5000000
-MEASURE_OPS=5000000
+WARMUP_OPS=50000
+MEASURE_OPS=50000
 REPEAT=5
-FIELD_LENGTH=10
-RECORD_COUNT=10000000000
 
 WORKLOAD_LABELS=("read100" "read95" "read50")
 READ_PROPORTIONS=("readproportion=1 -p insertproportion=0" \
@@ -149,4 +148,3 @@ ssh rzp5412@10.10.1.6 "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keysp
 
 
 done
-echo "16 threads"

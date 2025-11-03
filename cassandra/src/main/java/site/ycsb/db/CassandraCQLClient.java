@@ -439,6 +439,7 @@ public class CassandraCQLClient extends DB {
 
       logger.debug(stmt.getQueryString());
       logger.debug("startKey = {}, recordcount = {}", startkey, recordcount);
+      // System.out.println("startKey = " + startkey + ", recordcount = " + recordcount);
 
       ResultSet rs = session.execute(stmt.bind(startkey, Integer.valueOf(recordcount)));
 

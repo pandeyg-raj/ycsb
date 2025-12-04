@@ -78,6 +78,8 @@ for i in "${!WORKLOAD_LABELS[@]}"; do
 
   #start script to calculate cache miss rate
   for host in "${hosts[@]}"; do
+    ssh rzp5412@$host "rm -rf /mydata/cassandra/cache_miss_log.csv"  
+    ssh rzp5412@$host "chmod +x /mydata/cassandra/cache_miss_control.sh"
     ssh rzp5412@$host "nohup /mydata/cassandra/cache_miss_control.sh start\"${EXP_LABEL}_${workload}\" >> /tmp/cache_monitor.log 2>&1 & echo \$!"
   done
   
@@ -107,5 +109,5 @@ for i in "${!WORKLOAD_LABELS[@]}"; do
 done
 echo "collecting final result of cache hit/mis"
 for host in "${hosts[@]}"; do
-  ssh rzp5412@$host "cat /var/log/cache_miss_log.csv" >> "$breakdownresult"
+  ssh rzp5412@$host "cat /mydata/cassandra/cache_miss_log.csv" >> "$breakdownresult"
 done

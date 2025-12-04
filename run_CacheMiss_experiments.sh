@@ -76,12 +76,8 @@ for i in "${!WORKLOAD_LABELS[@]}"; do
   READ_PCT="${READ_PROPORTIONS[$i]}"
   echo "Workload: $workload "
 
-  #start script to calculate cache miss rate
-  for host in "${hosts[@]}"; do
-    ssh rzp5412@$host "rm -rf /mydata/cassandra/cache_miss_log.csv"  
-    ssh rzp5412@$host "chmod +x /mydata/cassandra/cache_miss_control.sh"
-    ssh rzp5412@$host "nohup /mydata/cassandra/cache_miss_control.sh start\"${EXP_LABEL}_${workload}\" >> /tmp/cache_monitor.log 2>&1 & echo \$!"
-  done
+  # start cache data collection for workload
+  read -p "Start cache collection for ${workload} and press Enter to continue..."
   
   for i in $(seq 1 $REPEAT); do
     echo "--- Run $i of $workload ---" 
@@ -100,14 +96,12 @@ for i in "${!WORKLOAD_LABELS[@]}"; do
     -s >> "${OUT_DIR}/${EXP_LABEL}_run${FIELD_LENGTH}Bytes.log" 2>&1
     echo "------ Run phase done: $MEASURE_OPS ops of ${READ_PCT}"
   done
+
+  ead -p "Stop cache collection for ${workload} and press Enter to continue..."
   echo "run for $READ_PCT done collecting data" >> "$breakdownresult"
 
   for host in "${hosts[@]}"; do
-    ssh rzp5412@$host "/mydata/cassandra/cache_miss_control.sh stop"
     ssh rzp5412@$host "/mydata/cassandra/bin/nodetool breakdown | grep -E 'keyspace|ycsb' && /mydata/cassandra/bin/nodetool breakdown --reset" >> "$breakdownresult"
   done
 done
-echo "collecting final result of cache hit/mis"
-for host in "${hosts[@]}"; do
-  ssh rzp5412@$host "cat /mydata/cassandra/cache_miss_log.csv" >> "$breakdownresult"
-done
+

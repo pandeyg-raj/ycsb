@@ -25,9 +25,9 @@ read WTHREADS
 echo "How Many Read threads"
 read THREADS
 
-mkdir -p Detailed_Breakdown_10KBRep3way
+mkdir -p Cache_Miss_10KB
 
-OUT_DIR=Detailed_Breakdown_10KBRep3way
+OUT_DIR=Cache_Miss_10KB
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
 
 # Load phase once
@@ -43,7 +43,7 @@ echo "Load phase: Done $RECORD_COUNT records of size ${FIELD_LENGTH} bytes"
 
 # collect data from all replicas and store in a file
 
-breakdownresult="Detailed_Breakdown_10KBRep3way_${EXP_LABEL}_summary.txt"
+breakdownresult="Cache_Miss_10KB_${EXP_LABEL}_summary.txt"
 
 touch "$breakdownresult"
 

@@ -7,7 +7,7 @@ STATE_DIR="/tmp/cache_monitor_state"
 STATE_FILE="$STATE_DIR/state"
 OUTPUT_FILE="$STATE_DIR/output"
 BPF_PID_FILE="$STATE_DIR/bpf_pid"
-LOGFILE="/var/log/cache_miss_log.csv"
+LOGFILE="/mydata/cassandra/cache_miss_log.csv"
 
 mkdir -p "$STATE_DIR"
 

@@ -9,7 +9,7 @@ operationcount=10
 requestdistribution=zipfian
 insertproportion=0.05
 scanproportion=0.95
-maxscanlength=1000
+maxscanlength=100
 
 # The distribution used to choose the number of records to access on a scan
 scanlengthdistribution=uniform

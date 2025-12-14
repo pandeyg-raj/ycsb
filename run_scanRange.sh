@@ -11,7 +11,7 @@ RECORD_COUNT=10000000
 declare -A WORKLOADS
 
 WORKLOAD_LABELS=("scanRange" )
-READ_PROPORTIONS=("scanproportion=0.95 -p insertproportion=0.05")
+READ_PROPORTIONS=("scanproportion=0.95 -p insertproportion=0.05 -p readproportion=0.0 -p updateproportion=0.0")
 
 echo "Is this ec or rep"
 read EXP_LABEL

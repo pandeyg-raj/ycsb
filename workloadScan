@@ -11,6 +11,10 @@ insertproportion=0.05
 scanproportion=0.95
 maxscanlength=100
 
+# for uniform testing fixing scan length by setting max and min same
+minscanlength=100
+
+
 scanlengthdistribution=uniform
 
 

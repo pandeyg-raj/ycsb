@@ -4,52 +4,65 @@ import site.ycsb.ByteIterator;
 import site.ycsb.Utils;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.Arrays;
-import java.util.Random;
 
 public class WikipediaByteIterator extends ByteIterator {
 
-    // Static corpus loaded once in memory
-    private static byte[] corpus;
-    private static int corpusLen;
+    // UTF-8 corpus as characters
+    private static String corpus;
+    private static int corpusChars;
 
     private final byte[] value;
     private int index = 0;
 
-    // Load corpus once
     static {
-        try {
-            corpus = Files.readAllBytes(Paths.get("wiki_corpus.txt"));
-            corpusLen = corpus.length;
-            if (corpusLen < 10_240) {
-                throw new RuntimeException("Corpus too small for 10KB objects");
-            }
-            System.out.println("Loaded corpus: " + corpusLen + " bytes");
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to load Wikipedia corpus", e);
-        }
+      try {
+          corpus = Files.readString(
+              Paths.get("wiki_corpus.txt"),
+              StandardCharsets.UTF_8
+          );
+          corpusChars = corpus.length();
+  
+          if (corpusChars < 4096) {
+              throw new RuntimeException("Corpus too small");
+          }
+  
+          System.out.println("Loaded UTF-8 corpus, chars=" + corpusChars);
+      } catch (IOException e) {
+          throw new RuntimeException("Failed to load UTF-8 Wikipedia corpus", e);
+      }
     }
 
-    /**
-     * Constructor
-     * @param key Unique YCSB key (String)
-     * @param size Object size in bytes (e.g., 10 KB)
-     */
+
     public WikipediaByteIterator(String key, int size) {
-        if (size >= corpusLen) {
-            throw new IllegalArgumentException(
-                "Object size must be smaller than corpus size"
-            );
+        long hash = Utils.hash(key.hashCode());
+        int charOffset = (int) ((hash & Long.MAX_VALUE) % corpusChars);
+
+        StringBuilder sb = new StringBuilder(size);
+
+        // Build UTF-8-safe text
+        while (sb.length() < size) {
+            sb.append(corpus.charAt(charOffset));
+            charOffset++;
+            if (charOffset == corpusChars) {
+                charOffset = 0;
+            }
         }
 
-        // Deterministic offset based on key hash
-        long hash = Utils.hash(key.hashCode());
-        int offset = (int) (Math.abs(hash) % (corpusLen - size));
+        // Encode to UTF-8
+        byte[] encoded = sb.toString().getBytes(StandardCharsets.UTF_8);
 
+        // Enforce exact byte size
         value = new byte[size];
-        System.arraycopy(corpus, offset, value, 0, size);
+        int copyLen = Math.min(encoded.length, size);
+        System.arraycopy(encoded, 0, value, 0, copyLen);
+
+        // Pad with spaces if needed (valid UTF-8)
+        for (int i = copyLen; i < size; i++) {
+            value[i] = (byte) ' ';
+        }
     }
 
     @Override

@@ -21,12 +21,6 @@ public class WikipediaByteIterator extends ByteIterator {
     private final byte[] value;
     private int index = 0;
 
-    // Decoder reused per thread
-    private static final CharsetDecoder DECODER =
-        StandardCharsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT);
-
     static {
         try {
             FileChannel ch = FileChannel.open(
@@ -52,19 +46,22 @@ public class WikipediaByteIterator extends ByteIterator {
         long hash = Utils.hash(key.hashCode());
         long offset = (hash & Long.MAX_VALUE) % (corpusSize - size * 4L);
 
-        // Decode in small window
-        ByteBuffer slice = corpus.duplicate();
-        slice.position((int) offset);
-        slice.limit((int) Math.min(offset + size * 4L, corpusSize));
+        CharsetDecoder decoder = StandardCharsets.UTF_8
+        .newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT);
 
         CharBuffer chars;
         try {
-            chars = DECODER.decode(slice);
+            chars = decoder.decode(slice);
         } catch (CharacterCodingException e) {
-            // Fallback: ASCII padding (still valid UTF-8)
-            for (int i = 0; i < size; i++) value[i] = ' ';
+            // Fallback: valid UTF-8 padding
+            for (int i = 0; i < size; i++) {
+                value[i] = (byte) ' ';
+            }
             return;
         }
+
 
         byte[] encoded = chars.toString().getBytes(StandardCharsets.UTF_8);
         int copy = Math.min(encoded.length, size);

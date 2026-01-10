@@ -45,7 +45,7 @@ public class WikipediaByteIterator extends ByteIterator {
         }
 
         // Deterministic offset based on key hash
-        long hash = Utils.hash(key);
+        long hash = Utils.hash(key.hashCode());
         int offset = (int) (Math.abs(hash) % (corpusLen - size));
 
         // Optional: 95% corpus text + 5% random

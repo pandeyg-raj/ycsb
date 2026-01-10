@@ -49,7 +49,7 @@ public class WikipediaByteIterator extends ByteIterator {
         int offset = (int) (Math.abs(hash) % (corpusLen - size));
 
         value = new byte[size];
-        System.arraycopy(corpus, offset, value, 0, Size);
+        System.arraycopy(corpus, offset, value, 0, size);
     }
 
     @Override

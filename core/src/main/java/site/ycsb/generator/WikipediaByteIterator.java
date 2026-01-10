@@ -1,6 +1,8 @@
 package site.ycsb.generator;
 
 import site.ycsb.ByteIterator;
+import java.nio.CharBuffer;
+
 import site.ycsb.Utils;
 
 import java.io.IOException;

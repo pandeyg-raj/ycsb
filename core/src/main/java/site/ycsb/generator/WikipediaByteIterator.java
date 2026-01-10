@@ -41,27 +41,23 @@ public class WikipediaByteIterator extends ByteIterator {
     }
 
     public WikipediaByteIterator(String key, int size) {
-        value = new byte[size];
+    value = new byte[size];
 
-        long hash = Utils.hash(key.hashCode());
-        long offset = (hash & Long.MAX_VALUE) % (corpusSize - size * 4L);
+    long hash = Utils.hash(key.hashCode());
+    long offset = (hash & Long.MAX_VALUE) % (corpusSize - size * 4L);
 
-        CharsetDecoder decoder = StandardCharsets.UTF_8
+    // Create a slice of the mapped corpus
+    ByteBuffer slice = corpus.duplicate();
+    slice.position((int) offset);
+    slice.limit((int) Math.min(offset + size * 4L, corpusSize));
+
+    CharsetDecoder decoder = StandardCharsets.UTF_8
         .newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT)
         .onUnmappableCharacter(CodingErrorAction.REPORT);
 
-        CharBuffer chars;
-        try {
-            chars = decoder.decode(slice);
-        } catch (CharacterCodingException e) {
-            // Fallback: valid UTF-8 padding
-            for (int i = 0; i < size; i++) {
-                value[i] = (byte) ' ';
-            }
-            return;
-        }
-
+    try {
+        CharBuffer chars = decoder.decode(slice);
 
         byte[] encoded = chars.toString().getBytes(StandardCharsets.UTF_8);
         int copy = Math.min(encoded.length, size);
@@ -69,9 +65,16 @@ public class WikipediaByteIterator extends ByteIterator {
 
         // Pad with spaces (valid UTF-8)
         for (int i = copy; i < size; i++) {
-            value[i] = ' ';
+            value[i] = (byte) ' ';
+        }
+    } catch (CharacterCodingException e) {
+        // Fallback: valid UTF-8
+        for (int i = 0; i < size; i++) {
+            value[i] = (byte) ' ';
         }
     }
+}
+
 
     @Override
     public boolean hasNext() {

@@ -4,64 +4,73 @@ import site.ycsb.ByteIterator;
 import site.ycsb.Utils;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.*;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 public class WikipediaByteIterator extends ByteIterator {
 
-    // UTF-8 corpus as characters
-    private static String corpus;
-    private static int corpusChars;
+    private static MappedByteBuffer corpus;
+    private static long corpusSize;
 
     private final byte[] value;
     private int index = 0;
 
+    // Decoder reused per thread
+    private static final CharsetDecoder DECODER =
+        StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT);
+
     static {
-      try {
-          corpus = Files.readString(
-              Paths.get("wiki_corpus.txt"),
-              StandardCharsets.UTF_8
-          );
-          corpusChars = corpus.length();
-  
-          if (corpusChars < 4096) {
-              throw new RuntimeException("Corpus too small");
-          }
-  
-          System.out.println("Loaded UTF-8 corpus, chars=" + corpusChars);
-      } catch (IOException e) {
-          throw new RuntimeException("Failed to load UTF-8 Wikipedia corpus", e);
-      }
+        try {
+            FileChannel ch = FileChannel.open(
+                Path.of("wiki_corpus.txt"),
+                StandardOpenOption.READ
+            );
+            corpusSize = ch.size();
+            corpus = ch.map(FileChannel.MapMode.READ_ONLY, 0, corpusSize);
+
+            if (corpusSize < 10240) {
+                throw new RuntimeException("Corpus too small");
+            }
+
+            System.out.println("Mapped UTF-8 corpus: " + corpusSize + " bytes");
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to mmap Wikipedia corpus", e);
+        }
     }
 
-
     public WikipediaByteIterator(String key, int size) {
+        value = new byte[size];
+
         long hash = Utils.hash(key.hashCode());
-        int charOffset = (int) ((hash & Long.MAX_VALUE) % corpusChars);
+        long offset = (hash & Long.MAX_VALUE) % (corpusSize - size * 4L);
 
-        StringBuilder sb = new StringBuilder(size);
+        // Decode in small window
+        ByteBuffer slice = corpus.duplicate();
+        slice.position((int) offset);
+        slice.limit((int) Math.min(offset + size * 4L, corpusSize));
 
-        // Build UTF-8-safe text
-        while (sb.length() < size) {
-            sb.append(corpus.charAt(charOffset));
-            charOffset++;
-            if (charOffset == corpusChars) {
-                charOffset = 0;
-            }
+        CharBuffer chars;
+        try {
+            chars = DECODER.decode(slice);
+        } catch (CharacterCodingException e) {
+            // Fallback: ASCII padding (still valid UTF-8)
+            for (int i = 0; i < size; i++) value[i] = ' ';
+            return;
         }
 
-        // Encode to UTF-8
-        byte[] encoded = sb.toString().getBytes(StandardCharsets.UTF_8);
+        byte[] encoded = chars.toString().getBytes(StandardCharsets.UTF_8);
+        int copy = Math.min(encoded.length, size);
+        System.arraycopy(encoded, 0, value, 0, copy);
 
-        // Enforce exact byte size
-        value = new byte[size];
-        int copyLen = Math.min(encoded.length, size);
-        System.arraycopy(encoded, 0, value, 0, copyLen);
-
-        // Pad with spaces if needed (valid UTF-8)
-        for (int i = copyLen; i < size; i++) {
-            value[i] = (byte) ' ';
+        // Pad with spaces (valid UTF-8)
+        for (int i = copy; i < size; i++) {
+            value[i] = ' ';
         }
     }
 

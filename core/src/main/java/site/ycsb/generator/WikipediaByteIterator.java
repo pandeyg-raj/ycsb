@@ -48,17 +48,8 @@ public class WikipediaByteIterator extends ByteIterator {
         long hash = Utils.hash(key.hashCode());
         int offset = (int) (Math.abs(hash) % (corpusLen - size));
 
-        // Optional: 95% corpus text + 5% random
-        int textSize = (int) (size * 0.95);
-        int randSize = size - textSize;
-
         value = new byte[size];
-        System.arraycopy(corpus, offset, value, 0, textSize);
-
-        byte[] rand = new byte[randSize];
-        // Use hash as seed for deterministic randomness
-        new Random(hash).nextBytes(rand);
-        System.arraycopy(rand, 0, value, textSize, randSize);
+        System.arraycopy(corpus, offset, value, 0, Size);
     }
 
     @Override

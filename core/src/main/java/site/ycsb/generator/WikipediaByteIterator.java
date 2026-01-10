@@ -4,29 +4,27 @@ import site.ycsb.ByteIterator;
 import site.ycsb.Utils;
 
 import java.io.IOException;
-import java.nio.file.Files;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Paths;
-import java.util.Arrays;
+import java.nio.file.StandardOpenOption;
 import java.util.Random;
 
 public class WikipediaByteIterator extends ByteIterator {
 
-    // Static corpus loaded once in memory
-    private static byte[] corpus;
-    private static int corpusLen;
+    // Shared memory-mapped corpus
+    private static MappedByteBuffer corpusBuf;
+    private static long corpusLen;
 
     private final byte[] value;
     private int index = 0;
 
-    // Load corpus once
     static {
         try {
-            corpus = Files.readAllBytes(Paths.get("wiki_corpus.txt"));
-            corpusLen = corpus.length;
-            if (corpusLen < 10_240) {
-                throw new RuntimeException("Corpus too small for 10KB objects");
-            }
-            System.out.println("Loaded corpus: " + corpusLen + " bytes");
+            FileChannel fc = FileChannel.open(Paths.get("wiki_corpus.txt"), StandardOpenOption.READ);
+            corpusBuf = fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size());
+            corpusLen = fc.size();
+            System.out.println("Loaded Wikipedia corpus from " + corpusPath + " (" + corpusLen + " bytes)");
         } catch (IOException e) {
             throw new RuntimeException("Failed to load Wikipedia corpus", e);
         }
@@ -34,29 +32,37 @@ public class WikipediaByteIterator extends ByteIterator {
 
     /**
      * Constructor
-     * @param key Unique YCSB key (String)
-     * @param size Object size in bytes (e.g., 10 KB)
+     * @param key unique YCSB key + field
+     * @param size object size in bytes
      */
     public WikipediaByteIterator(String key, int size) {
+        if (size > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Object size too large: " + size);
+        }
         if (size >= corpusLen) {
-            throw new IllegalArgumentException(
-                "Object size must be smaller than corpus size"
-            );
+            throw new IllegalArgumentException("Object size must be smaller than corpus size");
         }
 
-        // Deterministic offset based on key hash
+        // Deterministic offset
         long hash = Utils.hash(key.hashCode());
-        int offset = (int) (Math.abs(hash) % (corpusLen - size));
+        int offset = (int)(Math.abs(hash) % (corpusLen - size));
 
-        // Optional: 95% corpus text + 5% random
-        int textSize = (int) (size * 0.95);
+        // 95% corpus text + 5% random
+        int textSize = (int)(size * 0.95);
         int randSize = size - textSize;
 
         value = new byte[size];
-        System.arraycopy(corpus, offset, value, 0, textSize);
 
+        // Copy from memory-mapped buffer
+        synchronized (corpusBuf) {
+            // Use temporary buffer to avoid modifying shared buffer position
+            MappedByteBuffer slice = corpusBuf.duplicate();
+            slice.position(offset);
+            slice.get(value, 0, textSize);
+        }
+
+        // Deterministic random suffix
         byte[] rand = new byte[randSize];
-        // Use hash as seed for deterministic randomness
         new Random(hash).nextBytes(rand);
         System.arraycopy(rand, 0, value, textSize, randSize);
     }

@@ -56,7 +56,7 @@ public class WikipediaByteIterator extends ByteIterator {
         // Copy from memory-mapped buffer
         synchronized (corpusBuf) {
             // Use temporary buffer to avoid modifying shared buffer position
-            MappedByteBuffer slice = corpusBuf.duplicate();
+            ByteBuffer slice = corpusBuf.duplicate();
             slice.position(offset);
             slice.get(value, 0, textSize);
         }

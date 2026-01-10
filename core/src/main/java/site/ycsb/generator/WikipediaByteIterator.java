@@ -13,7 +13,7 @@ import java.util.Random;
 public class WikipediaByteIterator extends ByteIterator {
 
     // Shared memory-mapped corpus
-    private static MappedByteBuffer corpusBuf;
+    private static ByteBuffer corpusBuf;
     private static long corpusLen;
 
     private final byte[] value;

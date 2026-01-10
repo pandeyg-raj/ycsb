@@ -24,7 +24,7 @@ public class WikipediaByteIterator extends ByteIterator {
             FileChannel fc = FileChannel.open(Paths.get("wiki_corpus.txt"), StandardOpenOption.READ);
             corpusBuf = fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size());
             corpusLen = fc.size();
-            System.out.println("Loaded Wikipedia corpus from " + corpusPath + " (" + corpusLen + " bytes)");
+            System.out.println("Loaded Wikipedia corpus from wiki_corpus.txt (" + corpusLen + " bytes)");
         } catch (IOException e) {
             throw new RuntimeException("Failed to load Wikipedia corpus", e);
         }

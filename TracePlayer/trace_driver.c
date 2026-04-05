@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <math.h>
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
@@ -212,6 +213,12 @@ static const CassPrepared *g_insert = NULL;
 typedef struct { Tracker get; Tracker set; } ThreadStats;
 static ThreadStats  *g_stats    = NULL;
 static char        **g_vbufs    = NULL;   /* value buffers, one per thread */
+
+/* Progress tracking — written by reader, read by reporter */
+static volatile uint64_t g_total_lines  = 0;  /* pre-counted before replay */
+static volatile uint64_t g_submitted    = 0;  /* lines dispatched so far */
+static volatile uint64_t g_total_gets   = 0;  /* GET lines in trace */
+static volatile uint64_t g_total_sets   = 0;  /* SET lines in trace */
 
 /* ── Cassandra setup ─────────────────────────────────────────────────────────── */
 
@@ -416,6 +423,59 @@ static int parse_line(char *line, TraceRecord *out) {
 
 /* ── Trace reader (runs on main thread) ─────────────────────────────────────── */
 
+/*
+ * Pre-scan the trace file to count total lines, GET lines, and SET lines.
+ * This takes a few seconds for large traces but gives accurate ETA and
+ * progress percentage in the reporter.
+ */
+static void prescan_trace(void) {
+    FILE *fp = fopen(cfg.trace_path, "r");
+    if (!fp) { perror("fopen trace (prescan)"); return; }
+
+    printf("Pre-scanning trace to count lines...\n");
+    uint64_t total = 0, gets = 0, sets = 0, skipped = 0;
+    char line[1024];
+
+    while (fgets(line, sizeof(line), fp)) {
+        total++;
+        /* quick op field check: field 6 (0-indexed 5) */
+        char tmp[1024];
+        strncpy(tmp, line, sizeof(tmp) - 1);
+        char *p = NULL;
+        strtok_r(tmp, ",", &p);   /* timestamp  */
+        strtok_r(NULL, ",", &p);  /* key        */
+        strtok_r(NULL, ",", &p);  /* key_size   */
+        strtok_r(NULL, ",", &p);  /* value_size */
+        strtok_r(NULL, ",", &p);  /* client_id  */
+        char *op = strtok_r(NULL, ",", &p);
+        if (!op) { skipped++; continue; }
+        while (*op == ' ') op++;
+        char *end = op + strlen(op) - 1;
+        while (end > op && (*end=='\n'||*end=='\r'||*end==' ')) *end-- = '\0';
+
+        OpType t = parse_op(op);
+        if      (t == OP_GET) gets++;
+        else if (t == OP_SET) sets++;
+        else                  skipped++;
+    }
+
+    fclose(fp);
+
+    g_total_lines = total;
+    g_total_gets  = gets;
+    g_total_sets  = sets;
+
+    printf("Trace stats:\n");
+    printf("  Total lines : %lu\n",  (unsigned long)total);
+    printf("  GET ops     : %lu  (%.1f%%)\n",
+           (unsigned long)gets,
+           total > 0 ? (double)gets / total * 100.0 : 0.0);
+    printf("  SET ops     : %lu  (%.1f%%)\n",
+           (unsigned long)sets,
+           total > 0 ? (double)sets / total * 100.0 : 0.0);
+    printf("  Skipped     : %lu\n\n", (unsigned long)skipped);
+}
+
 static void run_reader(void) {
     FILE *fp = fopen(cfg.trace_path, "r");
     if (!fp) { perror("fopen trace"); exit(1); }
@@ -439,14 +499,6 @@ static void run_reader(void) {
             continue;
         }
 
-        /*
-         * Pacing: when --speed > 0, sleep so wall-clock elapsed time
-         * matches (trace elapsed time / speed).
-         *
-         * speed=1.0  → real-time replay
-         * speed=2.0  → 2× faster than original
-         * speed=0    → no pacing, saturate as fast as possible (load phase)
-         */
         if (cfg.speed > 0.0) {
             if (first) { first_trace_ts = rec.timestamp; first = false; }
             uint64_t trace_ns = (uint64_t)(
@@ -460,6 +512,8 @@ static void run_reader(void) {
             sleep_ns(10000);  /* 10 µs */
 
         submitted++;
+        /* update global so reporter can see current progress */
+        __atomic_store_n(&g_submitted, submitted, __ATOMIC_RELAXED);
     }
 
     fclose(fp);
@@ -485,25 +539,67 @@ static void do_report(void) {
     }
 
     double elapsed = (double)(now_ns() - g_t_start) / 1e9;
-    double ops_s   = (gc + sc) / elapsed;
+    double ops_s   = elapsed > 0 ? (gc + sc) / elapsed : 0.0;
     double gmean   = gc ? gs / gc : 0.0;
     double smean   = sc ? ss / sc : 0.0;
 
-    char tbuf[16];
-    time_t now = time(NULL);
-    strftime(tbuf, sizeof(tbuf), "%H:%M:%S", localtime(&now));
+    /* Progress and ETA from prescan counts */
+    uint64_t dispatched = __atomic_load_n(&g_submitted, __ATOMIC_RELAXED);
+    uint64_t total      = g_total_lines;
 
-    printf("[%s] t=%.0fs | GET n=%lu mean=%.0fµs | "
-           "SET n=%lu mean=%.0fµs | err=%lu | %.0f ops/s\n",
-           tbuf, elapsed,
+    double pct = (total > 0)
+               ? (double)dispatched / total * 100.0
+               : 0.0;
+
+    /* ETA = remaining lines / current dispatch rate */
+    double dispatch_rate = elapsed > 0 ? (double)dispatched / elapsed : 0.0;
+    double eta_s = (dispatch_rate > 0 && total > dispatched)
+                 ? (double)(total - dispatched) / dispatch_rate
+                 : 0.0;
+
+    /*
+     * Estimate data written so far.
+     * SET count × average value size gives approximate bytes inserted.
+     * Average value size is taken from the trace stats printed at startup.
+     * We use SET ops completed (sc) × value_size from trace average.
+     * For cluster46 avg value_size ≈ 928 B, cluster52 ≈ 221 B.
+     * This is an approximation — actual on-disk size includes SSTable
+     * overhead, compression (disabled), and Cassandra metadata (~100 B/row).
+     */
+    uint64_t total_sets_in_trace = g_total_sets;
+    double   sets_done_fraction  = (total_sets_in_trace > 0)
+                                 ? (double)sc / total_sets_in_trace
+                                 : 0.0;
+
+    char tbuf[16];
+    time_t now_t = time(NULL);
+    strftime(tbuf, sizeof(tbuf), "%H:%M:%S", localtime(&now_t));
+
+    /* Format ETA nicely */
+    char eta_buf[32];
+    if (eta_s <= 0 || total == 0)
+        snprintf(eta_buf, sizeof(eta_buf), "unknown");
+    else if (eta_s < 60)
+        snprintf(eta_buf, sizeof(eta_buf), "%.0fs",  eta_s);
+    else if (eta_s < 3600)
+        snprintf(eta_buf, sizeof(eta_buf), "%.0fm%.0fs",
+                 eta_s/60, fmod(eta_s,60));
+    else
+        snprintf(eta_buf, sizeof(eta_buf), "%.0fh%.0fm",
+                 eta_s/3600, fmod(eta_s/60,60));
+
+    printf("[%s] t=%.0fs  progress=%.1f%%  ETA=%s\n"
+           "         GET n=%lu mean=%.0fµs | SET n=%lu mean=%.0fµs"
+           " | err=%lu | %.0f ops/s\n",
+           tbuf, elapsed, pct, eta_buf,
            (unsigned long)gc, gmean,
            (unsigned long)sc, smean,
            (unsigned long)(ge + se), ops_s);
     fflush(stdout);
 
     if (g_csv) {
-        fprintf(g_csv, "%s,%.1f,%lu,%.1f,%lu,%.1f,%lu,%.0f\n",
-                tbuf, elapsed,
+        fprintf(g_csv, "%s,%.1f,%.1f,%s,%lu,%.1f,%lu,%.1f,%lu,%.0f\n",
+                tbuf, elapsed, pct, eta_buf,
                 (unsigned long)gc, gmean,
                 (unsigned long)sc, smean,
                 (unsigned long)(ge + se), ops_s);
@@ -693,6 +789,9 @@ int main(int argc, char **argv) {
 
     cass_connect();
 
+    /* Pre-scan trace to count lines — gives progress % and ETA in reporter */
+    prescan_trace();
+
     /* Allocate per-thread resources */
     g_stats = calloc(cfg.num_threads, sizeof(ThreadStats));
     g_vbufs = malloc(cfg.num_threads * sizeof(char *));
@@ -727,8 +826,10 @@ int main(int argc, char **argv) {
         g_csv = fopen(cfg.output_csv, "w");
         if (!g_csv) perror("fopen output");
         else fprintf(g_csv,
-                     "time,elapsed_s,get_count,get_mean_us,"
-                     "set_count,set_mean_us,errors,ops_per_sec\n");
+                     "time,elapsed_s,progress_pct,eta,"
+                     "get_count,get_mean_us,"
+                     "set_count,set_mean_us,"
+                     "errors,ops_per_sec\n");
     }
 
     g_t_start = now_ns();

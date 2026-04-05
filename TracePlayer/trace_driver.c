@@ -172,26 +172,27 @@ static inline void sleep_ns(uint64_t ns) {
 
 /* ── Config ─────────────────────────────────────────────────────────────────── */
 
+/*
+ * Keyspace, table, and replication factor are hardcoded to match the
+ * exact schema from the original program:
+ *   keyspace = ycsb, table = usertable, RF = 5, DURABLE_WRITES = true
+ */
 typedef struct {
     const char *trace_path;
-    const char *hosts;          /* comma-separated */
+    const char *hosts;          /* coordinator node IP */
     int         port;
-    const char *keyspace;
-    const char *table;
     int         num_threads;
     int         duration_sec;
     double      speed;          /* replay speed vs real-time; 0 = max rate */
     const char *output_csv;
     int         least_mode;     /* 1 = prepend 0x00 to field0 (LEAST EC trigger) */
-    int         disable_ttl;    /* 1 = write all data with no TTL (grows WSS to disk) */
+    int         disable_ttl;    /* 1 = write all data permanently (no TTL expiry) */
 } Config;
 
 static Config cfg = {
     .trace_path  = NULL,
-    .hosts       = "127.0.0.1",
+    .hosts       = "10.10.1.1",
     .port        = 9042,
-    .keyspace    = "ycsb",
-    .table       = "usertable",
     .num_threads = 32,
     .duration_sec= 300,
     .speed       = 1.0,
@@ -235,59 +236,93 @@ static void cass_connect(void) {
     g_session = cass_session_new();
 
     cass_cluster_set_contact_points(g_cluster, cfg.hosts);
-    cass_cluster_set_whitelist_filtering(g_cluster, cfg.hosts);
     cass_cluster_set_port(g_cluster, cfg.port);
     cass_cluster_set_num_threads_io(g_cluster, 4);
     cass_cluster_set_queue_size_io(g_cluster, 65536);
     cass_cluster_set_consistency(g_cluster, CASS_CONSISTENCY_LOCAL_QUORUM);
 
-    CassFuture *f = cass_session_connect_keyspace(g_session, g_cluster,
-                                                   cfg.keyspace);
+    /*
+     * Pin the coordinator to the specified host.
+     * Matches: cass_cluster_set_whitelist_filtering(cluster, "10.10.1.2")
+     * from the original program — ensures all requests go through
+     * this node so we're measuring a single known coordinator.
+     */
+    cass_cluster_set_whitelist_filtering(g_cluster, cfg.hosts);
+
+    /* Step 1: connect without a keyspace first (same as original program) */
+    CassFuture *f = cass_session_connect(g_session, g_cluster);
     cass_future_wait(f);
     if (cass_future_error_code(f) != CASS_OK)
         cass_die("connect", f);
     cass_future_free(f);
+    printf("Connected to Cassandra cluster!\n");
 
-    printf("Connected to %s:%d  keyspace=%s\n",
-           cfg.hosts, cfg.port, cfg.keyspace);
-
-    /* Ensure the table exists with exact YCSB schema */
+    /* Step 2: create keyspace — exact query from original program */
     {
-        char q[1024];
-        snprintf(q, sizeof(q),
-            "CREATE TABLE IF NOT EXISTS %s.%s ("
+        const char *q =
+            "CREATE KEYSPACE IF NOT EXISTS ycsb "
+            "WITH replication = {"
+            "  'class': 'SimpleStrategy',"
+            "  'replication_factor': '5'"
+            "} AND DURABLE_WRITES = true;";
+        f = cass_session_execute(g_session, cass_statement_new(q, 0));
+        cass_future_wait(f);
+        if (cass_future_error_code(f) != CASS_OK) {
+            const char *msg; size_t len;
+            cass_future_error_message(f, &msg, &len);
+            fprintf(stderr, "Failed to create keyspace: %.*s\n", (int)len, msg);
+            /* non-fatal — keyspace may already exist */
+        }
+        cass_future_free(f);
+        fprintf(stderr, "Create keyspace: Success, waiting 5s to propagate\n");
+        sleep(5);
+    }
+
+    /* Step 3: create table — exact query from original program */
+    {
+        const char *q =
+            "CREATE TABLE IF NOT EXISTS ycsb.usertable ("
             "  y_id   varchar,"
             "  field0 varchar,"
             "  PRIMARY KEY (y_id)"
-            ") WITH caching     = {'keys':'NONE','rows_per_partition':'none'}"
-            "  AND  compression = {'enabled':false}"
-            "  AND  read_repair = 'NONE'",
-            cfg.keyspace, cfg.table);
+            ") WITH caching = { 'keys' : 'NONE', 'rows_per_partition' : 'none' }"
+            "  AND compression = { 'enabled' : false }"
+            "  AND read_repair = 'NONE';";
         f = cass_session_execute(g_session, cass_statement_new(q, 0));
         cass_future_wait(f);
-        /* Non-fatal if table already exists */
+        if (cass_future_error_code(f) != CASS_OK) {
+            const char *msg; size_t len;
+            cass_future_error_message(f, &msg, &len);
+            fprintf(stderr, "Failed to create table: %.*s\n", (int)len, msg);
+            /* non-fatal — table may already exist */
+        }
         cass_future_free(f);
-        printf("Table %s.%s ready\n", cfg.keyspace, cfg.table);
+        fprintf(stderr, "Create table: Success, waiting 10s to propagate\n");
+        sleep(10);
     }
 
-    /* Prepare SELECT */
+    /* Step 4: switch session to ycsb keyspace */
     {
-        char q[256];
-        snprintf(q, sizeof(q),
-                 "SELECT field0 FROM %s WHERE y_id = ?", cfg.table);
-        f = cass_session_prepare(g_session, q);
+        f = cass_session_execute(g_session,
+                cass_statement_new("USE ycsb", 0));
+        cass_future_wait(f);
+        if (cass_future_error_code(f) != CASS_OK)
+            cass_die("USE ycsb", f);
+        cass_future_free(f);
+    }
+
+    /* Step 5: prepare SELECT and INSERT */
+    {
+        f = cass_session_prepare(g_session,
+                "SELECT field0 FROM usertable WHERE y_id = ?");
         cass_future_wait(f);
         if (cass_future_error_code(f) != CASS_OK) cass_die("prepare SELECT", f);
         g_select = cass_future_get_prepared(f);
         cass_future_free(f);
     }
-
-    /* Prepare INSERT (no TTL — data is permanent with --disable-ttl) */
     {
-        char q[256];
-        snprintf(q, sizeof(q),
-                 "INSERT INTO %s (y_id, field0) VALUES (?, ?)", cfg.table);
-        f = cass_session_prepare(g_session, q);
+        f = cass_session_prepare(g_session,
+                "INSERT INTO usertable (y_id, field0) VALUES (?, ?)");
         cass_future_wait(f);
         if (cass_future_error_code(f) != CASS_OK) cass_die("prepare INSERT", f);
         g_insert = cass_future_get_prepared(f);
@@ -698,26 +733,25 @@ static void usage(const char *prog) {
     printf("Required:\n");
     printf("  --trace    PATH   trace file (plain text, decompressed)\n\n");
     printf("Cassandra:\n");
-    printf("  --host     IP     contact point(s), comma-separated (default: 127.0.0.1)\n");
+    printf("  --host     IP     coordinator node IP (default: 10.10.1.1)\n");
     printf("  --port     N      CQL port (default: 9042)\n");
-    printf("  --keyspace NAME   keyspace (default: ycsb)\n");
-    printf("  --table    NAME   table (default: usertable)\n\n");
+    printf("  Schema is fixed: ycsb.usertable, RF=5, DURABLE_WRITES=true\n\n");
     printf("Workload:\n");
     printf("  --threads  N      concurrent workers (default: 32)\n");
     printf("  --duration N      seconds to run (default: 300)\n");
     printf("  --speed    F      replay speed vs real-time (default: 1.0)\n");
-    printf("                    0 = ignore timestamps, run at max rate (load phase)\n\n");
+    printf("                    0 = ignore timestamps, max rate (load phase)\n\n");
     printf("LEAST / data size:\n");
     printf("  --least           prepend 0x00 to field0 (LEAST EC trigger)\n");
     printf("  --disable-ttl     ignore trace TTLs, write data permanently\n");
-    printf("                    use this to push working set past RAM limit\n\n");
+    printf("                    use this to push working set past 32 GB RAM\n\n");
     printf("Output:\n");
     printf("  --output   PATH   latency timeseries CSV (default: latency.csv)\n\n");
     printf("Examples:\n");
-    printf("  # Load phase (no timing, max speed)\n");
+    printf("  # Load phase (populate DB, no timing)\n");
     printf("  %s --trace cluster46.0 --host 10.10.1.1 \\\n", prog);
     printf("       --least --disable-ttl --speed 0 --output /dev/null\n\n");
-    printf("  # Benchmark phase\n");
+    printf("  # Benchmark phase (timed measurement)\n");
     printf("  %s --trace cluster46.0 --host 10.10.1.1 \\\n", prog);
     printf("       --least --disable-ttl --speed 1.0 \\\n");
     printf("       --duration 300 --output least_c46.csv\n");
@@ -728,8 +762,6 @@ static void parse_args(int argc, char **argv) {
         {"trace",       required_argument, 0, 't'},
         {"host",        required_argument, 0, 'H'},
         {"port",        required_argument, 0, 'p'},
-        {"keyspace",    required_argument, 0, 'k'},
-        {"table",       required_argument, 0, 'T'},
         {"threads",     required_argument, 0, 'n'},
         {"duration",    required_argument, 0, 'd'},
         {"speed",       required_argument, 0, 's'},
@@ -740,14 +772,12 @@ static void parse_args(int argc, char **argv) {
         {0,0,0,0}
     };
     int c, idx;
-    while ((c = getopt_long(argc, argv, "t:H:p:k:T:n:d:s:LXo:h",
+    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:LXo:h",
                             opts, &idx)) != -1) {
         switch (c) {
         case 't': cfg.trace_path  = optarg;       break;
         case 'H': cfg.hosts       = optarg;       break;
         case 'p': cfg.port        = atoi(optarg); break;
-        case 'k': cfg.keyspace    = optarg;       break;
-        case 'T': cfg.table       = optarg;       break;
         case 'n': cfg.num_threads = atoi(optarg); break;
         case 'd': cfg.duration_sec= atoi(optarg); break;
         case 's': cfg.speed       = atof(optarg); break;
@@ -775,7 +805,7 @@ int main(int argc, char **argv) {
     printf("LEAST Trace Driver\n");
     printf("Trace    : %s\n", cfg.trace_path);
     printf("Host     : %s:%d\n", cfg.hosts, cfg.port);
-    printf("Keyspace : %s.%s\n", cfg.keyspace, cfg.table);
+    printf("Keyspace : ycsb.usertable  (RF=5, DURABLE_WRITES=true)\n");
     printf("Threads  : %d\n", cfg.num_threads);
     printf("Duration : %ds\n", cfg.duration_sec);
     printf("Speed    : %.1fx%s\n", cfg.speed, cfg.speed==0?" (max rate)":"");

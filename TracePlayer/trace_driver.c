@@ -440,7 +440,8 @@ static void prescan_trace(void) {
         total++;
         /* quick op field check: field 6 (0-indexed 5) */
         char tmp[1024];
-        strncpy(tmp, line, sizeof(tmp) - 1);
+        memcpy(tmp, line, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
         char *p = NULL;
         strtok_r(tmp, ",", &p);   /* timestamp  */
         strtok_r(NULL, ",", &p);  /* key        */
@@ -492,7 +493,8 @@ static void run_reader(void) {
             break;
 
         char tmp[1024];
-        strncpy(tmp, line, sizeof(tmp) - 1);
+        memcpy(tmp, line, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
         TraceRecord rec;
         if (parse_line(tmp, &rec) < 0 || rec.op == OP_SKIP) {
             skipped++;
@@ -567,9 +569,7 @@ static void do_report(void) {
      * overhead, compression (disabled), and Cassandra metadata (~100 B/row).
      */
     uint64_t total_sets_in_trace = g_total_sets;
-    double   sets_done_fraction  = (total_sets_in_trace > 0)
-                                 ? (double)sc / total_sets_in_trace
-                                 : 0.0;
+    (void)total_sets_in_trace;  /* reserved for future disk-size estimate */
 
     char tbuf[16];
     time_t now_t = time(NULL);

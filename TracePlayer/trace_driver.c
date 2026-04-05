@@ -235,6 +235,7 @@ static void cass_connect(void) {
     g_session = cass_session_new();
 
     cass_cluster_set_contact_points(g_cluster, cfg.hosts);
+    cass_cluster_set_whitelist_filtering(g_cluster, cfg.hosts);
     cass_cluster_set_port(g_cluster, cfg.port);
     cass_cluster_set_num_threads_io(g_cluster, 4);
     cass_cluster_set_queue_size_io(g_cluster, 65536);

@@ -47,10 +47,13 @@
 /* ── Constants ──────────────────────────────────────────────────────────────── */
 
 #define MAX_KEY_LEN     256
-#define MAX_VALUE_SIZE  (512 * 1024)   /* 512 KB cap — well above any trace value */
 #define QUEUE_CAPACITY  8192           /* must be power of 2 */
 #define REPORT_INTERVAL 10             /* seconds between progress prints */
 #define MAX_SAMPLES     2000000        /* per-thread latency samples */
+
+/* Maximum value size found in the trace — set during prescan, used to
+ * allocate per-thread value buffers. No arbitrary cap, no truncation. */
+static int g_max_value_size = 0;
 
 /* ── Operation type ─────────────────────────────────────────────────────────── */
 
@@ -378,8 +381,9 @@ static void *worker_fn(void *arg) {
 
         } else if (rec.op == OP_SET) {
             int vsz = rec.value_size;
-            if (vsz <= 0)             vsz = 1;
-            if (vsz > MAX_VALUE_SIZE) vsz = MAX_VALUE_SIZE;
+            if (vsz <= 0) vsz = 1;
+            /* vsz is guaranteed <= g_max_value_size (found during prescan)
+             * so the pre-allocated buffer is always large enough — no cap needed */
 
             CassStatement *s = cass_prepared_bind(g_insert);
             cass_statement_bind_string(s, 0, rec.key);
@@ -470,6 +474,7 @@ static void prescan_trace(void) {
 
     printf("Pre-scanning trace to count lines...\n");
     uint64_t total = 0, gets = 0, sets = 0, skipped = 0;
+    int      max_vsz = 0;
     char line[1024];
 
     while (fgets(line, sizeof(line), fp)) {
@@ -482,7 +487,7 @@ static void prescan_trace(void) {
         strtok_r(tmp, ",", &p);   /* timestamp  */
         strtok_r(NULL, ",", &p);  /* key        */
         strtok_r(NULL, ",", &p);  /* key_size   */
-        strtok_r(NULL, ",", &p);  /* value_size */
+        char *vsz_tok = strtok_r(NULL, ",", &p);  /* value_size */
         strtok_r(NULL, ",", &p);  /* client_id  */
         char *op = strtok_r(NULL, ",", &p);
         if (!op) { skipped++; continue; }
@@ -491,26 +496,36 @@ static void prescan_trace(void) {
         while (end > op && (*end=='\n'||*end=='\r'||*end==' ')) *end-- = '\0';
 
         OpType t = parse_op(op);
-        if      (t == OP_GET) gets++;
-        else if (t == OP_SET) sets++;
-        else                  skipped++;
+        if (t == OP_GET) {
+            gets++;
+        } else if (t == OP_SET) {
+            sets++;
+            /* track max value_size so we can allocate exact buffer */
+            int vsz = vsz_tok ? atoi(vsz_tok) : 0;
+            if (vsz > max_vsz) max_vsz = vsz;
+        } else {
+            skipped++;
+        }
     }
 
     fclose(fp);
 
-    g_total_lines = total;
-    g_total_gets  = gets;
-    g_total_sets  = sets;
+    g_total_lines    = total;
+    g_total_gets     = gets;
+    g_total_sets     = sets;
+    g_max_value_size = max_vsz;
 
     printf("Trace stats:\n");
-    printf("  Total lines : %lu\n",  (unsigned long)total);
-    printf("  GET ops     : %lu  (%.1f%%)\n",
+    printf("  Total lines   : %lu\n",  (unsigned long)total);
+    printf("  GET ops       : %lu  (%.1f%%)\n",
            (unsigned long)gets,
            total > 0 ? (double)gets / total * 100.0 : 0.0);
-    printf("  SET ops     : %lu  (%.1f%%)\n",
+    printf("  SET ops       : %lu  (%.1f%%)\n",
            (unsigned long)sets,
            total > 0 ? (double)sets / total * 100.0 : 0.0);
-    printf("  Skipped     : %lu\n\n", (unsigned long)skipped);
+    printf("  Max value size: %d bytes  (%.1f KB)\n",
+           max_vsz, max_vsz / 1024.0);
+    printf("  Skipped       : %lu\n\n", (unsigned long)skipped);
 }
 
 static void run_reader(void) {
@@ -826,29 +841,34 @@ int main(int argc, char **argv) {
     /* Allocate per-thread resources */
     g_stats = calloc(cfg.num_threads, sizeof(ThreadStats));
     g_vbufs = malloc(cfg.num_threads * sizeof(char *));
+    int buf_size = g_max_value_size + 1;   /* +1 for null terminator */
     for (int i = 0; i < cfg.num_threads; i++) {
         tracker_init(&g_stats[i].get);
         tracker_init(&g_stats[i].set);
 
-        g_vbufs[i] = malloc(MAX_VALUE_SIZE + 1);
+        /* Allocate exactly max_value_size+1 bytes — sized from prescan,
+         * so no arbitrary cap and no truncation of large values. */
+        g_vbufs[i] = malloc(buf_size);
         if (!g_vbufs[i]) { perror("malloc vbuf"); exit(1); }
 
         if (cfg.least_mode) {
             /*
              * LEAST EC trigger: 0x00 at byte 0, rest is 'a'.
-             * Total stored = value_size bytes (trace value_size unchanged).
-             *
-             *   vbuf[0]        = 0x00  ← LEAST reads this to decide EC
-             *   vbuf[1..N-1]   = 'a'
+             *   vbuf[0]       = 0x00  ← LEAST reads this to decide EC
+             *   vbuf[1..N-1]  = 'a'
              */
             g_vbufs[i][0] = '\x00';
-            memset(g_vbufs[i] + 1, 'a', MAX_VALUE_SIZE - 1);
+            memset(g_vbufs[i] + 1, 'a', buf_size - 2);
         } else {
             /* Plain Cassandra: all 'a' */
-            memset(g_vbufs[i], 'a', MAX_VALUE_SIZE);
+            memset(g_vbufs[i], 'a', buf_size - 1);
         }
-        g_vbufs[i][MAX_VALUE_SIZE] = '\0';
+        g_vbufs[i][buf_size - 1] = '\0';
     }
+
+    printf("Value buffer: %d bytes/thread × %d threads = %.1f MB\n\n",
+           buf_size, cfg.num_threads,
+           (double)buf_size * cfg.num_threads / (1024.0 * 1024.0));
 
     queue_init(&g_queue, QUEUE_CAPACITY);
 

@@ -724,34 +724,25 @@ static void run_reader(void) {
     bool     first          = true;
     uint64_t submitted = 0, skipped = 0;
 
-    /* load-buffer cutoff: only populated when --load and --load-buffer are set.
-     * Since the trace is sorted by timestamp, we break as soon as we exceed it. */
-    bool     use_cutoff = (cfg.load_mode && cfg.load_buffer >= 0);
-    uint64_t cutoff_ts  = 0;   /* set after first timestamp is seen */
+    printf("Reader: will process exactly %lu lines (from prescan)\n",
+           (unsigned long)g_total_lines);
+
+    /* Always stop after exactly the lines prescan counted.
+     * Prescan applies the correct window (load-buffer or full file),
+     * so g_total_lines is always the right stopping point regardless
+     * of whether --full-trace or --load-buffer is used. */
+    uint64_t line_limit = g_total_lines;
+    uint64_t lines_read = 0;
 
     while (!g_stop && fgets(line, sizeof(line), fp)) {
-        /* fast timestamp extraction directly from raw line —
-         * identical logic to prescan, no dependency on parse_line */
-        uint64_t ts = (uint64_t)strtoull(line, NULL, 10);
 
-        /* set cutoff on first line (ts=0 lines included) */
-        if (first) {
-            first_trace_ts = ts;
-            cutoff_ts = first_trace_ts
-                      + (uint64_t)cfg.duration_sec
-                      + (use_cutoff ? (uint64_t)cfg.load_buffer : 0);
-            first = false;
-            printf("Load cutoff: first_ts=%lu  cutoff_ts=%lu\n",
-                   (unsigned long)first_trace_ts,
-                   (unsigned long)cutoff_ts);
-        }
-
-        /* trace is sorted — break as soon as we exceed load window */
-        if (use_cutoff && ts > cutoff_ts)
+        /* stop after prescan's exact line count */
+        if (lines_read >= line_limit)
             break;
+        lines_read++;
 
-        /* honour wall-clock duration limit (benchmark phase, no cutoff) */
-        if (!cfg.full_trace && cfg.load_buffer < 0 &&
+        /* wall-clock duration limit (benchmark phase only) */
+        if (!cfg.load_mode &&
             now_ns() - start_wall > (uint64_t)cfg.duration_sec * 1000000000ULL)
             break;
 
@@ -764,10 +755,15 @@ static void run_reader(void) {
             continue;
         }
 
-        /* pacing for benchmark phase */
+        /* set pacing reference on first valid record */
+        if (first) {
+            first_trace_ts = rec.timestamp;
+            first = false;
+        }
+
         if (cfg.speed > 0.0) {
             uint64_t trace_ns = (uint64_t)(
-                (double)(ts - first_trace_ts) / cfg.speed * 1e9);
+                (double)(rec.timestamp - first_trace_ts) / cfg.speed * 1e9);
             uint64_t wall_ns  = now_ns() - start_wall;
             if (trace_ns > wall_ns) sleep_ns(trace_ns - wall_ns);
         }
@@ -780,8 +776,10 @@ static void run_reader(void) {
 
     fclose(fp);
     g_queue.done = 1;
-    printf("\nTrace done: submitted=%lu  skipped=%lu\n",
-           (unsigned long)submitted, (unsigned long)skipped);
+    printf("\nTrace done: lines_read=%lu  submitted=%lu  skipped=%lu\n",
+           (unsigned long)lines_read,
+           (unsigned long)submitted,
+           (unsigned long)skipped);
 }
 
 /* ── Progress reporter ───────────────────────────────────────────────────────── */

@@ -192,8 +192,9 @@ typedef struct {
     int         least_mode;     /* 1 = prepend 0x00 to field0 (LEAST EC trigger) */
     int         disable_ttl;    /* 1 = write all data permanently (no TTL expiry) */
     int         full_trace;     /* 1 = run until trace file ends, ignore --duration */
-    const char *consistency;    /* CL string: ONE, LOCAL_QUORUM, QUORUM, ALL */
+    const char *consistency;
     int         load_mode;      /* 1 = skip GETs, only execute SETs (load phase) */
+    int         load_buffer;    /* seconds beyond duration to include in load (-1 = not set) */
     /* ── manual mode ── */
     int         manual;         /* 1 = ignore trace, use synthetic workload */
     uint64_t    num_keys;       /* number of unique keys (load writes all, bench reads all) */
@@ -214,6 +215,7 @@ static Config cfg = {
     .full_trace   = 0,
     .consistency  = "ONE",
     .load_mode    = 0,
+    .load_buffer  = -1,       /* -1 = not set, must be explicit */
     .manual       = 0,
     .num_keys     = 1000000,    /* 1M keys default */
     .value_size   = 1024,       /* 1 KB default */
@@ -627,40 +629,67 @@ static void prescan_trace(void) {
     FILE *fp = fopen(cfg.trace_path, "r");
     if (!fp) { perror("fopen trace (prescan)"); return; }
 
-    printf("Pre-scanning trace to count lines...\n");
+    printf("Pre-scanning trace");
+    if (cfg.load_mode && cfg.load_buffer >= 0)
+        printf(" (window: first %ds + %ds buffer = %ds)",
+               cfg.duration_sec, cfg.load_buffer,
+               cfg.duration_sec + cfg.load_buffer);
+    printf("...\n");
+
     uint64_t total = 0, gets = 0, sets = 0, skipped = 0;
     int      max_vsz = 0;
+    uint64_t first_ts = 0;
+    bool     first    = true;
+    /* cutoff only applies during load with --load-buffer */
+    bool     use_cutoff = (cfg.load_mode && cfg.load_buffer >= 0);
+    uint64_t cutoff_ts  = 0;   /* set after first timestamp is seen */
     char line[1024];
 
     while (fgets(line, sizeof(line), fp)) {
-        total++;
-        /* quick op field check: field 6 (0-indexed 5) */
         char tmp[1024];
         memcpy(tmp, line, sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = '\0';
         char *p = NULL;
-        strtok_r(tmp, ",", &p);   /* timestamp  */
-        strtok_r(NULL, ",", &p);  /* key        */
-        strtok_r(NULL, ",", &p);  /* key_size   */
-        char *vsz_tok = strtok_r(NULL, ",", &p);  /* value_size */
-        strtok_r(NULL, ",", &p);  /* client_id  */
-        char *op = strtok_r(NULL, ",", &p);
-        if (!op) { skipped++; continue; }
-        while (*op == ' ') op++;
-        char *end = op + strlen(op) - 1;
-        while (end > op && (*end=='\n'||*end=='\r'||*end==' ')) *end-- = '\0';
 
-        OpType t = parse_op(op);
+        char *ts_tok  = strtok_r(tmp,  ",", &p);
+        char *key_tok = strtok_r(NULL, ",", &p); (void)key_tok;
+        char *ksz_tok = strtok_r(NULL, ",", &p); (void)ksz_tok;
+        char *vsz_tok = strtok_r(NULL, ",", &p);
+        char *cid_tok = strtok_r(NULL, ",", &p); (void)cid_tok;
+        char *op_tok  = strtok_r(NULL, ",", &p);
+
+        if (!ts_tok || !op_tok) { skipped++; continue; }
+
+        uint64_t ts = (uint64_t)strtoull(ts_tok, NULL, 10);
+
+        /* record first timestamp and compute cutoff */
+        if (first) {
+            first_ts   = ts;
+            cutoff_ts  = first_ts + (uint64_t)cfg.duration_sec
+                       + (use_cutoff ? (uint64_t)cfg.load_buffer : 0);
+            first = false;
+        }
+
+        /* trace is sorted — once we exceed cutoff, we are done */
+        if (use_cutoff && ts > cutoff_ts)
+            break;
+
+        /* trim op string */
+        while (*op_tok == ' ') op_tok++;
+        char *end = op_tok + strlen(op_tok) - 1;
+        while (end > op_tok && (*end=='\n'||*end=='\r'||*end==' ')) *end-- = '\0';
+
+        OpType t = parse_op(op_tok);
         if (t == OP_GET) {
             gets++;
         } else if (t == OP_SET) {
             sets++;
-            /* track max value_size so we can allocate exact buffer */
             int vsz = vsz_tok ? atoi(vsz_tok) : 0;
             if (vsz > max_vsz) max_vsz = vsz;
         } else {
             skipped++;
         }
+        total++;
     }
 
     fclose(fp);
@@ -670,7 +699,7 @@ static void prescan_trace(void) {
     g_total_sets     = sets;
     g_max_value_size = max_vsz;
 
-    printf("Trace stats:\n");
+    printf("Trace stats (within scan window):\n");
     printf("  Total lines   : %lu\n",  (unsigned long)total);
     printf("  GET ops       : %lu  (%.1f%%)\n",
            (unsigned long)gets,
@@ -693,9 +722,14 @@ static void run_reader(void) {
     bool     first          = true;
     uint64_t submitted = 0, skipped = 0;
 
+    /* load-buffer cutoff: only populated when --load and --load-buffer are set.
+     * Since the trace is sorted by timestamp, we break as soon as we exceed it. */
+    bool     use_cutoff = (cfg.load_mode && cfg.load_buffer >= 0);
+    uint64_t cutoff_ts  = 0;   /* set after first timestamp is seen */
+
     while (!g_stop && fgets(line, sizeof(line), fp)) {
-        /* honour duration limit unless --full-trace is set */
-        if (!cfg.full_trace &&
+        /* honour duration limit unless --full-trace or --load-buffer is set */
+        if (!cfg.full_trace && cfg.load_buffer < 0 &&
             now_ns() - start_wall > (uint64_t)cfg.duration_sec * 1000000000ULL)
             break;
 
@@ -708,17 +742,34 @@ static void run_reader(void) {
             continue;
         }
 
+        /* set cutoff on first record */
+        if (first) {
+            first_trace_ts = rec.timestamp;
+            cutoff_ts = first_trace_ts
+                      + (uint64_t)cfg.duration_sec
+                      + (use_cutoff ? (uint64_t)cfg.load_buffer : 0);
+            first = false;
+        }
+
+        /* load-buffer cutoff: trace is sorted so break, not continue */
+        if (use_cutoff && rec.timestamp > cutoff_ts) {
+            printf("\nLoad-buffer cutoff reached at trace timestamp %lu "
+                   "(first=%lu cutoff=%lu)\n",
+                   (unsigned long)rec.timestamp,
+                   (unsigned long)first_trace_ts,
+                   (unsigned long)cutoff_ts);
+            break;
+        }
+
         if (cfg.speed > 0.0) {
-            if (first) { first_trace_ts = rec.timestamp; first = false; }
             uint64_t trace_ns = (uint64_t)(
                 (double)(rec.timestamp - first_trace_ts) / cfg.speed * 1e9);
             uint64_t wall_ns  = now_ns() - start_wall;
             if (trace_ns > wall_ns) sleep_ns(trace_ns - wall_ns);
         }
 
-        /* spin if queue is full */
         while (!g_stop && !queue_push(&g_queue, &rec))
-            sleep_ns(10000);  /* 10 µs */
+            sleep_ns(10000);
 
         submitted++;
     }
@@ -938,8 +989,13 @@ static void usage(const char *prog) {
     printf("  --speed    F      replay speed vs real-time (default: 1.0)\n");
     printf("                    1.0 = real-time, preserves original arrival pattern\n");
     printf("                    0   = max rate, ignore timestamps (load phase)\n");
-    printf("  --full-trace      run until trace file ends, ignore --duration\n");
-    printf("  --load            skip all GETs, only execute SETs (load phase)\n\n");
+    printf("  --load            skip all GETs, execute SETs only (load phase)\n");
+    printf("                    must be combined with exactly one of:\n");
+    printf("  --full-trace      load entire trace file (no time limit)\n");
+    printf("  --load-buffer N   load SETs from first (--duration + N) seconds\n");
+    printf("                    e.g. --duration 3600 --load-buffer 600\n");
+    printf("                    loads SETs from timestamps 0..4200\n");
+    printf("                    benchmark then replays timestamps 0..3600\n\n");
     printf("  --consistency CL  consistency level (default: ONE)\n");
     printf("                    ONE LOCAL_ONE LOCAL_QUORUM QUORUM ALL\n");
     printf("                    ONE matches YCSB default, recommended for RF=5\n\n");
@@ -982,6 +1038,7 @@ static void parse_args(int argc, char **argv) {
         {"disable-ttl", no_argument,       0, 'X'},
         {"full-trace",  no_argument,       0, 'F'},
         {"load",        no_argument,       0, 'W'},
+        {"load-buffer", required_argument, 0, 'B'},
         /* manual mode */
         {"manual",      no_argument,       0, 'M'},
         {"num-keys",    required_argument, 0, 'K'},
@@ -992,7 +1049,7 @@ static void parse_args(int argc, char **argv) {
         {0,0,0,0}
     };
     int c, idx;
-    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:c:LXFWo:MK:V:R:h",
+    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:c:LXFWo:MK:V:R:B:h",
                             opts, &idx)) != -1) {
         switch (c) {
         case 't': cfg.trace_path  = optarg;              break;
@@ -1006,6 +1063,7 @@ static void parse_args(int argc, char **argv) {
         case 'X': cfg.disable_ttl = 1;                   break;
         case 'F': cfg.full_trace  = 1;                   break;
         case 'W': cfg.load_mode   = 1;                   break;
+        case 'B': cfg.load_buffer = atoi(optarg);        break;
         case 'M': cfg.manual      = 1;                   break;
         case 'K': cfg.num_keys    = (uint64_t)atoll(optarg); break;
         case 'V': cfg.value_size  = atoi(optarg);        break;
@@ -1018,6 +1076,29 @@ static void parse_args(int argc, char **argv) {
     if (!cfg.manual && !cfg.trace_path) {
         fprintf(stderr, "ERROR: --trace is required (or use --manual)\n\n");
         usage(argv[0]); exit(1);
+    }
+
+    /* --load-buffer and --full-trace are mutually exclusive */
+    if (cfg.load_buffer >= 0 && cfg.full_trace) {
+        fprintf(stderr,
+            "ERROR: --load-buffer and --full-trace cannot both be set.\n"
+            "  --full-trace   : load entire trace file (no time limit)\n"
+            "  --load-buffer N: load only first (duration + N) seconds\n"
+            "Choose one.\n\n");
+        exit(1);
+    }
+
+    /* during trace load, exactly one of --full-trace or --load-buffer must be set */
+    if (!cfg.manual && cfg.load_mode) {
+        if (!cfg.full_trace && cfg.load_buffer < 0) {
+            fprintf(stderr,
+                "ERROR: --load requires either --full-trace or --load-buffer N.\n"
+                "  --full-trace      : load the entire trace file\n"
+                "  --load-buffer N   : load only first (--duration + N) seconds\n"
+                "                      e.g. --duration 3600 --load-buffer 600\n"
+                "                      loads all SETs from the first 4200 seconds\n\n");
+            exit(1);
+        }
     }
 }
 
@@ -1047,6 +1128,10 @@ int main(int argc, char **argv) {
         printf("Phase    : %s\n", cfg.load_mode
                ? "LOAD  (SETs only, GETs skipped)"
                : "BENCHMARK  (GETs + SETs measured)");
+        if (cfg.load_mode && cfg.load_buffer >= 0)
+            printf("Load win : first %ds + %ds buffer = %ds of trace\n",
+                   cfg.duration_sec, cfg.load_buffer,
+                   cfg.duration_sec + cfg.load_buffer);
         if (cfg.full_trace)
             printf("Duration : until trace ends (--full-trace)\n");
         else

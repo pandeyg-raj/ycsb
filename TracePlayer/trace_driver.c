@@ -221,10 +221,18 @@ static inline bool queue_push(RingQueue *q, const TraceRecord *r) {
 }
 
 static inline bool queue_pop(RingQueue *q, TraceRecord *out) {
-    uint64_t tail = q->tail;
-    if (tail == __atomic_load_n(&q->head, __ATOMIC_ACQUIRE)) return false;
+    uint64_t tail, head;
+    do {
+        tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
+        head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+        if (tail == head) return false;   /* queue empty */
+        /* CAS: only one thread wins the right to consume slot 'tail' */
+    } while (!__atomic_compare_exchange_n(&q->tail, &tail, tail + 1,
+                                          /*weak=*/true,
+                                          __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE));
+    /* we exclusively own slot tail — safe to read */
     *out = q->buf[tail & q->mask];
-    __atomic_store_n(&q->tail, tail + 1, __ATOMIC_RELEASE);
     return true;
 }
 

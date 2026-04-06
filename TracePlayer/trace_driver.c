@@ -190,6 +190,7 @@ typedef struct {
     const char *output_csv;
     int         least_mode;     /* 1 = prepend 0x00 to field0 (LEAST EC trigger) */
     int         disable_ttl;    /* 1 = write all data permanently (no TTL expiry) */
+    int         full_trace;     /* 1 = run until trace file ends, ignore --duration */
 } Config;
 
 static Config cfg = {
@@ -197,11 +198,12 @@ static Config cfg = {
     .hosts       = "10.10.1.1",
     .port        = 9042,
     .num_threads = 32,
-    .duration_sec= 300,
+    .duration_sec= 3600,        /* default 1 hour for benchmark phase */
     .speed       = 1.0,
     .output_csv  = "latency.csv",
     .least_mode  = 0,
     .disable_ttl = 0,
+    .full_trace  = 0,
 };
 
 /* ── Shared globals ──────────────────────────────────────────────────────────── */
@@ -539,8 +541,9 @@ static void run_reader(void) {
     uint64_t submitted = 0, skipped = 0;
 
     while (!g_stop && fgets(line, sizeof(line), fp)) {
-        /* honour duration limit */
-        if (now_ns() - start_wall > (uint64_t)cfg.duration_sec * 1000000000ULL)
+        /* honour duration limit unless --full-trace is set */
+        if (!cfg.full_trace &&
+            now_ns() - start_wall > (uint64_t)cfg.duration_sec * 1000000000ULL)
             break;
 
         char tmp[1024];
@@ -753,9 +756,12 @@ static void usage(const char *prog) {
     printf("  Schema is fixed: ycsb.usertable, RF=5, DURABLE_WRITES=true\n\n");
     printf("Workload:\n");
     printf("  --threads  N      concurrent workers (default: 32)\n");
-    printf("  --duration N      seconds to run (default: 300)\n");
+    printf("  --duration N      seconds to run (default: 3600 = 1 hour)\n");
     printf("  --speed    F      replay speed vs real-time (default: 1.0)\n");
-    printf("                    0 = ignore timestamps, max rate (load phase)\n\n");
+    printf("                    1.0 = real-time, preserves original arrival pattern\n");
+    printf("                    0   = max rate, ignore timestamps (load phase)\n");
+    printf("  --full-trace      run until trace file ends, ignore --duration\n");
+    printf("                    use this for load phase so all data is written\n\n");
     printf("LEAST / data size:\n");
     printf("  --least           prepend 0x00 to field0 (LEAST EC trigger)\n");
     printf("  --disable-ttl     ignore trace TTLs, write data permanently\n");
@@ -763,13 +769,14 @@ static void usage(const char *prog) {
     printf("Output:\n");
     printf("  --output   PATH   latency timeseries CSV (default: latency.csv)\n\n");
     printf("Examples:\n");
-    printf("  # Load phase (populate DB, no timing)\n");
-    printf("  %s --trace cluster46.0 --host 10.10.1.1 \\\n", prog);
-    printf("       --least --disable-ttl --speed 0 --output /dev/null\n\n");
-    printf("  # Benchmark phase (timed measurement)\n");
-    printf("  %s --trace cluster46.0 --host 10.10.1.1 \\\n", prog);
+    printf("  # Load phase: max rate, run until entire trace is loaded\n");
+    printf("  %s --trace cluster50.sort --host 10.10.1.1 \\\n", prog);
+    printf("       --least --disable-ttl --speed 0 --full-trace \\\n");
+    printf("       --output /dev/null\n\n");
+    printf("  # Benchmark phase: real-time arrival pattern, first 1 hour of trace\n");
+    printf("  %s --trace cluster50.sort --host 10.10.1.1 \\\n", prog);
     printf("       --least --disable-ttl --speed 1.0 \\\n");
-    printf("       --duration 300 --output least_c46.csv\n");
+    printf("       --duration 3600 --output least_c50.csv\n");
 }
 
 static void parse_args(int argc, char **argv) {
@@ -782,12 +789,13 @@ static void parse_args(int argc, char **argv) {
         {"speed",       required_argument, 0, 's'},
         {"least",       no_argument,       0, 'L'},
         {"disable-ttl", no_argument,       0, 'X'},
+        {"full-trace",  no_argument,       0, 'F'},
         {"output",      required_argument, 0, 'o'},
         {"help",        no_argument,       0, 'h'},
         {0,0,0,0}
     };
     int c, idx;
-    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:LXo:h",
+    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:LXFo:h",
                             opts, &idx)) != -1) {
         switch (c) {
         case 't': cfg.trace_path  = optarg;       break;
@@ -798,6 +806,7 @@ static void parse_args(int argc, char **argv) {
         case 's': cfg.speed       = atof(optarg); break;
         case 'L': cfg.least_mode  = 1;            break;
         case 'X': cfg.disable_ttl = 1;            break;
+        case 'F': cfg.full_trace  = 1;            break;
         case 'o': cfg.output_csv  = optarg;       break;
         case 'h': usage(argv[0]); exit(0);
         default:  usage(argv[0]); exit(1);
@@ -822,8 +831,14 @@ int main(int argc, char **argv) {
     printf("Host     : %s:%d\n", cfg.hosts, cfg.port);
     printf("Keyspace : ycsb.usertable  (RF=5, DURABLE_WRITES=true)\n");
     printf("Threads  : %d\n", cfg.num_threads);
-    printf("Duration : %ds\n", cfg.duration_sec);
-    printf("Speed    : %.1fx%s\n", cfg.speed, cfg.speed==0?" (max rate)":"");
+    if (cfg.full_trace)
+        printf("Duration : until trace ends (--full-trace)\n");
+    else
+        printf("Duration : %ds (%.1f hours)\n",
+               cfg.duration_sec, cfg.duration_sec / 3600.0);
+    printf("Speed    : %.1fx%s\n", cfg.speed,
+           cfg.speed == 0.0 ? " (max rate — load phase)" :
+           cfg.speed == 1.0 ? " (real-time — benchmark phase)" : "");
     printf("Mode     : %s\n", cfg.least_mode
            ? "LEAST  (0x00 prefix on field0)"
            : "Default Cassandra (no prefix)");

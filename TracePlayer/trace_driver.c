@@ -1117,15 +1117,13 @@ int main(int argc, char **argv) {
         /* reader runs on main thread */
         run_reader();
 
-        /* drain the queue */
-        while (!g_stop) {
-            if (__atomic_load_n(&g_queue.head, __ATOMIC_RELAXED) ==
-                __atomic_load_n(&g_queue.tail, __ATOMIC_RELAXED)) break;
-            sleep_ns(1000000);
-        }
-        g_stop = 1;
+        /* reader finished and set g_queue.done = 1.
+         * Workers exit naturally when queue is empty AND g_queue.done is set.
+         * Just join them — do NOT set g_stop before joining, as that would
+         * cause workers to exit before processing all queued records. */
         for (int i = 0; i < cfg.num_threads; i++)
             pthread_join(workers[i].tid, NULL);
+        g_stop = 1;   /* now stop reporter */
 
         /* debug: show per-thread counts and total */
         uint64_t dbg_sets = 0;

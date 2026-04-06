@@ -227,7 +227,6 @@ static char        **g_vbufs    = NULL;   /* value buffers, one per thread */
 
 /* Progress tracking — written by reader, read by reporter */
 static volatile uint64_t g_total_lines  = 0;  /* pre-counted before replay */
-static volatile uint64_t g_submitted    = 0;  /* lines dispatched so far */
 static volatile uint64_t g_total_gets   = 0;  /* GET lines in trace */
 static volatile uint64_t g_total_sets   = 0;  /* SET lines in trace */
 
@@ -593,8 +592,6 @@ static void run_reader(void) {
             sleep_ns(10000);  /* 10 µs */
 
         submitted++;
-        /* update global so reporter can see current progress */
-        __atomic_store_n(&g_submitted, submitted, __ATOMIC_RELAXED);
     }
 
     fclose(fp);
@@ -624,19 +621,35 @@ static void do_report(void) {
     double gmean   = gc ? gs / gc : 0.0;
     double smean   = sc ? ss / sc : 0.0;
 
-    /* Progress and ETA from prescan counts */
-    uint64_t dispatched = __atomic_load_n(&g_submitted, __ATOMIC_RELAXED);
-    uint64_t total      = g_total_lines;
+    /*
+     * Progress based on ops EXECUTED by workers, not lines read by reader.
+     *
+     * During --load mode: only SETs execute, so progress = sets_done / total_sets.
+     * During benchmark:   both execute,   so progress = ops_done  / total_ops.
+     *
+     * This correctly shows progress even after the reader thread finishes,
+     * since workers may still be draining a backlog of pending SETs.
+     */
+    uint64_t ops_done, ops_total;
+    if (cfg.load_mode) {
+        /* only SETs run during load — GETs are skipped */
+        ops_done  = sc;
+        ops_total = g_total_sets;
+    } else {
+        ops_done  = gc + sc;
+        ops_total = g_total_gets + g_total_sets;
+    }
 
-    double pct = (total > 0)
-               ? (double)dispatched / total * 100.0
+    double pct = (ops_total > 0)
+               ? (double)ops_done / ops_total * 100.0
                : 0.0;
+    if (pct > 100.0) pct = 100.0;
 
-    /* ETA = remaining lines / current dispatch rate */
-    double dispatch_rate = elapsed > 0 ? (double)dispatched / elapsed : 0.0;
-    double eta_s = (dispatch_rate > 0 && total > dispatched)
-                 ? (double)(total - dispatched) / dispatch_rate
-                 : 0.0;
+    /* ETA based on current execution rate, not reader dispatch rate */
+    double exec_rate = elapsed > 0 ? (double)ops_done / elapsed : 0.0;
+    double eta_s     = (exec_rate > 0 && ops_done < ops_total)
+                     ? (double)(ops_total - ops_done) / exec_rate
+                     : 0.0;
 
     /*
      * Estimate data written so far.
@@ -648,7 +661,7 @@ static void do_report(void) {
      * overhead, compression (disabled), and Cassandra metadata (~100 B/row).
      */
     uint64_t total_sets_in_trace = g_total_sets;
-    (void)total_sets_in_trace;  /* reserved for future disk-size estimate */
+    (void)total_sets_in_trace;
 
     char tbuf[16];
     time_t now_t = time(NULL);
@@ -800,11 +813,13 @@ static void usage(const char *prog) {
     printf("  # Load phase: SETs only, max rate, run until trace ends\n");
     printf("  %s --trace cluster50.sort --host 10.10.1.1 \\\n", prog);
     printf("       --least --disable-ttl --consistency ONE \\\n");
-    printf("       --load --full-trace --speed 0 --output /dev/null\n\n");
+    printf("       --load --full-trace --speed 0 --threads 64 \\\n");
+    printf("       --output /dev/null\n\n");
     printf("  # Benchmark phase: GETs + SETs, real-time, first 1 hour\n");
     printf("  %s --trace cluster50.sort --host 10.10.1.1 \\\n", prog);
     printf("       --least --disable-ttl --consistency ONE \\\n");
-    printf("       --speed 1.0 --duration 3600 --output least_c50.csv\n");
+    printf("       --speed 1.0 --duration 3600 --threads 64 \\\n");
+    printf("       --output least_c50.csv\n");
 }
 
 static void parse_args(int argc, char **argv) {

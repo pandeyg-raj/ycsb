@@ -22,8 +22,8 @@ STEP 1 — LOAD PHASE
             Stops when the entire trace file has been read (--full-trace).
 
   LEAST cluster:
-    ./trace_driver --trace cluster46.sort --host 10.10.1.1 \
-                   --least --disable-ttl --consistency ONE  \
+    ./trace_driver --trace cluster46.sort --host 10.10.1.2 \
+                   --least --disable-ttl --consistency ALL  \
                    --load --full-trace --speed 0            \
                    --threads 64                             \
                    --output /dev/null
@@ -49,8 +49,8 @@ STEP 2 — BENCHMARK PHASE
             Both GET and SET operations are issued and measured.
 
   LEAST cluster:
-    ./trace_driver --trace cluster46.sort --host 10.10.1.1 \
-                   --least --disable-ttl --consistency ONE  \
+    ./trace_driver --trace cluster46.sort --host 10.10.1.2 \
+                   --least --disable-ttl --consistency QUORUM  \
                    --speed 1.0 --duration 3600              \
                    --threads 64                             \
                    --output results/least_c46.csv

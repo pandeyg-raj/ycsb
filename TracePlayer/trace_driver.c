@@ -905,69 +905,85 @@ static void sig_handler(int s) { (void)s; g_stop = 1; }
 /* ── Final summary ───────────────────────────────────────────────────────────── */
 
 static void print_summary(void) {
-    /* merge all per-thread samples */
-    uint64_t total_gn = 0, total_sn = 0;
+    /* First pass: accumulate true op counts and sample sizes */
+    uint64_t true_gc = 0, true_sc = 0;
+    uint64_t samp_gn = 0, samp_sn = 0;
+    double   sum_gus = 0, sum_sus = 0;
+    uint64_t err_g   = 0, err_s   = 0;
+
     for (int i = 0; i < cfg.num_threads; i++) {
-        uint64_t gn = g_stats[i].get.count;
-        uint64_t sn = g_stats[i].set.count;
-        total_gn += gn < MAX_SAMPLES ? gn : MAX_SAMPLES;
-        total_sn += sn < MAX_SAMPLES ? sn : MAX_SAMPLES;
+        Tracker *g = &g_stats[i].get;
+        Tracker *s = &g_stats[i].set;
+        true_gc += g->count;  sum_gus += g->sum_us;  err_g += g->errors;
+        true_sc += s->count;  sum_sus += s->sum_us;  err_s += s->errors;
+        samp_gn += g->count < (uint64_t)MAX_SAMPLES ? g->count : MAX_SAMPLES;
+        samp_sn += s->count < (uint64_t)MAX_SAMPLES ? s->count : MAX_SAMPLES;
     }
 
-    Tracker mg, ms;
-    mg.samples = malloc((total_gn + 1) * sizeof(double));
-    ms.samples = malloc((total_sn + 1) * sizeof(double));
-    mg.count = ms.count = 0;
-    mg.sum_us = ms.sum_us = 0;
-    mg.errors = ms.errors = 0;
-    mg.capacity = total_gn + 1;
-    ms.capacity = total_sn + 1;
+    /* Second pass: copy samples into flat arrays for sorting */
+    double *gsamp = malloc((samp_gn + 1) * sizeof(double));
+    double *ssamp = malloc((samp_sn + 1) * sizeof(double));
+    uint64_t gi = 0, si = 0;
 
     for (int i = 0; i < cfg.num_threads; i++) {
         Tracker *g = &g_stats[i].get;
         Tracker *s = &g_stats[i].set;
         uint64_t gn = g->count < (uint64_t)MAX_SAMPLES ? g->count : MAX_SAMPLES;
         uint64_t sn = s->count < (uint64_t)MAX_SAMPLES ? s->count : MAX_SAMPLES;
-
-        mg.count   += g->count;  mg.sum_us += g->sum_us; mg.errors += g->errors;
-        ms.count   += s->count;  ms.sum_us += s->sum_us; ms.errors += s->errors;
-
-        for (uint64_t j = 0; j < gn; j++) tracker_record(&mg, g->samples[j]);
-        for (uint64_t j = 0; j < sn; j++) tracker_record(&ms, s->samples[j]);
+        /* memcpy directly — do NOT call tracker_record which increments count */
+        memcpy(gsamp + gi, g->samples, gn * sizeof(double)); gi += gn;
+        memcpy(ssamp + si, s->samples, sn * sizeof(double)); si += sn;
     }
 
+    qsort(gsamp, samp_gn, sizeof(double), cmp_double);
+    qsort(ssamp, samp_sn, sizeof(double), cmp_double);
+
+    #define PCT(arr, n, p) \
+        ((n) > 0 ? (arr)[((uint64_t)((n)*(p)/100.0) < (n)) \
+                        ? (uint64_t)((n)*(p)/100.0) : (n)-1] : 0.0)
+
     double elapsed = (double)(now_ns() - g_t_start) / 1e9;
-    uint64_t total = mg.count + ms.count;
 
     printf("\n══════════════════════════════════════════════════════════\n");
-    printf("FINAL RESULTS  trace=%s\n", cfg.trace_path);
-    printf("Mode   : %s\n", cfg.least_mode ? "LEAST (0x00 EC prefix)" : "Default Cassandra");
-    printf("TTL    : %s\n", cfg.disable_ttl ? "disabled (permanent data)" : "from trace");
+    printf("FINAL RESULTS  trace=%s\n",
+           cfg.manual ? "(manual mode)" : cfg.trace_path);
+    printf("Mode   : %s\n", cfg.least_mode
+           ? "LEAST (0x00 EC prefix)" : "Default Cassandra");
+    printf("TTL    : %s\n", cfg.disable_ttl
+           ? "disabled (permanent data)" : "from trace");
     printf("──────────────────────────────────────────────────────────\n");
     printf("%-6s %10s %10s %10s %10s %10s\n",
            "Op","Count","Mean µs","p50 µs","p99 µs","p999 µs");
     printf("──────────────────────────────────────────────────────────\n");
 
-    if (mg.count)
+    if (true_gc)
         printf("%-6s %10lu %10.0f %10.0f %10.0f %10.0f\n", "GET",
-               (unsigned long)mg.count, tracker_mean(&mg),
-               tracker_pct(&mg,50), tracker_pct(&mg,99), tracker_pct(&mg,99.9));
+               (unsigned long)true_gc,
+               sum_gus / true_gc,
+               PCT(gsamp, samp_gn, 50.0),
+               PCT(gsamp, samp_gn, 99.0),
+               PCT(gsamp, samp_gn, 99.9));
 
-    if (ms.count)
+    if (true_sc)
         printf("%-6s %10lu %10.0f %10.0f %10.0f %10.0f\n", "SET",
-               (unsigned long)ms.count, tracker_mean(&ms),
-               tracker_pct(&ms,50), tracker_pct(&ms,99), tracker_pct(&ms,99.9));
+               (unsigned long)true_sc,
+               sum_sus / true_sc,
+               PCT(ssamp, samp_sn, 50.0),
+               PCT(ssamp, samp_sn, 99.0),
+               PCT(ssamp, samp_sn, 99.9));
 
     printf("──────────────────────────────────────────────────────────\n");
     printf("Total ops  : %lu  (%.0f ops/s)\n",
-           (unsigned long)total, elapsed > 0 ? total/elapsed : 0);
+           (unsigned long)(true_gc + true_sc),
+           elapsed > 0 ? (true_gc + true_sc) / elapsed : 0);
     printf("Errors GET : %lu   SET: %lu\n",
-           (unsigned long)mg.errors, (unsigned long)ms.errors);
+           (unsigned long)err_g, (unsigned long)err_s);
     printf("Duration   : %.1f s\n", elapsed);
     printf("══════════════════════════════════════════════════════════\n");
 
-    free(mg.samples);
-    free(ms.samples);
+    #undef PCT
+    free(gsamp);
+    free(ssamp);
 }
 
 /* ── CLI ─────────────────────────────────────────────────────────────────────── */

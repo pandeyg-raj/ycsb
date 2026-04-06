@@ -193,6 +193,7 @@ typedef struct {
     int         disable_ttl;    /* 1 = write all data permanently (no TTL expiry) */
     int         full_trace;     /* 1 = run until trace file ends, ignore --duration */
     const char *consistency;    /* CL string: ONE, LOCAL_QUORUM, QUORUM, ALL */
+    int         load_mode;      /* 1 = skip GETs, only execute SETs (load phase) */
 } Config;
 
 static Config cfg = {
@@ -206,7 +207,8 @@ static Config cfg = {
     .least_mode   = 0,
     .disable_ttl  = 0,
     .full_trace   = 0,
-    .consistency  = "ONE",      /* matches YCSB default */
+    .consistency  = "ONE",
+    .load_mode    = 0,
 };
 
 /* ── Shared globals ──────────────────────────────────────────────────────────── */
@@ -384,6 +386,13 @@ static void *worker_fn(void *arg) {
         uint64_t t0 = now_ns();
 
         if (rec.op == OP_GET) {
+            /* In load mode, skip GETs entirely — we only want to populate
+             * the database with SET operations. Issuing GETs during load
+             * wastes time and returns empty results anyway since the keys
+             * may not have been written yet. */
+            if (cfg.load_mode)
+                continue;
+
             CassStatement *s = cass_prepared_bind(g_select);
             cass_statement_bind_string(s, 0, rec.key);
             CassFuture *f = cass_session_execute(g_session, s);
@@ -777,7 +786,7 @@ static void usage(const char *prog) {
     printf("                    1.0 = real-time, preserves original arrival pattern\n");
     printf("                    0   = max rate, ignore timestamps (load phase)\n");
     printf("  --full-trace      run until trace file ends, ignore --duration\n");
-    printf("                    use this for load phase so all data is written\n");
+    printf("  --load            skip all GETs, only execute SETs (load phase)\n\n");
     printf("  --consistency CL  consistency level (default: ONE)\n");
     printf("                    ONE LOCAL_ONE LOCAL_QUORUM QUORUM ALL\n");
     printf("                    ONE matches YCSB default, recommended for RF=5\n\n");
@@ -788,14 +797,14 @@ static void usage(const char *prog) {
     printf("Output:\n");
     printf("  --output   PATH   latency timeseries CSV (default: latency.csv)\n\n");
     printf("Examples:\n");
-    printf("  # Load phase: max rate, run until entire trace is loaded\n");
+    printf("  # Load phase: SETs only, max rate, run until trace ends\n");
     printf("  %s --trace cluster50.sort --host 10.10.1.1 \\\n", prog);
-    printf("       --least --disable-ttl --speed 0 --full-trace \\\n");
-    printf("       --output /dev/null\n\n");
-    printf("  # Benchmark phase: real-time arrival pattern, first 1 hour of trace\n");
+    printf("       --least --disable-ttl --consistency ONE \\\n");
+    printf("       --load --full-trace --speed 0 --output /dev/null\n\n");
+    printf("  # Benchmark phase: GETs + SETs, real-time, first 1 hour\n");
     printf("  %s --trace cluster50.sort --host 10.10.1.1 \\\n", prog);
-    printf("       --least --disable-ttl --speed 1.0 \\\n");
-    printf("       --duration 3600 --output least_c50.csv\n");
+    printf("       --least --disable-ttl --consistency ONE \\\n");
+    printf("       --speed 1.0 --duration 3600 --output least_c50.csv\n");
 }
 
 static void parse_args(int argc, char **argv) {
@@ -810,12 +819,13 @@ static void parse_args(int argc, char **argv) {
         {"least",       no_argument,       0, 'L'},
         {"disable-ttl", no_argument,       0, 'X'},
         {"full-trace",  no_argument,       0, 'F'},
+        {"load",        no_argument,       0, 'W'},
         {"output",      required_argument, 0, 'o'},
         {"help",        no_argument,       0, 'h'},
         {0,0,0,0}
     };
     int c, idx;
-    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:c:LXFo:h",
+    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:c:LXFWo:h",
                             opts, &idx)) != -1) {
         switch (c) {
         case 't': cfg.trace_path  = optarg;       break;
@@ -828,6 +838,7 @@ static void parse_args(int argc, char **argv) {
         case 'L': cfg.least_mode  = 1;            break;
         case 'X': cfg.disable_ttl = 1;            break;
         case 'F': cfg.full_trace  = 1;            break;
+        case 'W': cfg.load_mode   = 1;            break;
         case 'o': cfg.output_csv  = optarg;       break;
         case 'h': usage(argv[0]); exit(0);
         default:  usage(argv[0]); exit(1);
@@ -864,6 +875,9 @@ int main(int argc, char **argv) {
            ? "LEAST  (0x00 prefix on field0)"
            : "Default Cassandra (no prefix)");
     printf("Consist  : %s\n", cfg.consistency);
+    printf("Phase    : %s\n", cfg.load_mode
+           ? "LOAD  (SETs only, GETs skipped)"
+           : "BENCHMARK  (GETs + SETs measured)");
     printf("TTL      : %s\n", cfg.disable_ttl
            ? "disabled  (data permanent, working set grows to disk)"
            : "from trace");

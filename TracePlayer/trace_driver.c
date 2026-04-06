@@ -191,19 +191,21 @@ typedef struct {
     int         least_mode;     /* 1 = prepend 0x00 to field0 (LEAST EC trigger) */
     int         disable_ttl;    /* 1 = write all data permanently (no TTL expiry) */
     int         full_trace;     /* 1 = run until trace file ends, ignore --duration */
+    const char *consistency;    /* CL string: ONE, LOCAL_QUORUM, QUORUM, ALL */
 } Config;
 
 static Config cfg = {
-    .trace_path  = NULL,
-    .hosts       = "10.10.1.1",
-    .port        = 9042,
-    .num_threads = 32,
-    .duration_sec= 3600,        /* default 1 hour for benchmark phase */
-    .speed       = 1.0,
-    .output_csv  = "latency.csv",
-    .least_mode  = 0,
-    .disable_ttl = 0,
-    .full_trace  = 0,
+    .trace_path   = NULL,
+    .hosts        = "10.10.1.1",
+    .port         = 9042,
+    .num_threads  = 32,
+    .duration_sec = 3600,
+    .speed        = 1.0,
+    .output_csv   = "latency.csv",
+    .least_mode   = 0,
+    .disable_ttl  = 0,
+    .full_trace   = 0,
+    .consistency  = "ONE",      /* matches YCSB default */
 };
 
 /* ── Shared globals ──────────────────────────────────────────────────────────── */
@@ -236,6 +238,19 @@ static void cass_die(const char *ctx, CassFuture *f) {
     exit(1);
 }
 
+static CassConsistency parse_consistency(const char *s) {
+    if (!strcasecmp(s, "ONE"))           return CASS_CONSISTENCY_ONE;
+    if (!strcasecmp(s, "TWO"))           return CASS_CONSISTENCY_TWO;
+    if (!strcasecmp(s, "THREE"))         return CASS_CONSISTENCY_THREE;
+    if (!strcasecmp(s, "QUORUM"))        return CASS_CONSISTENCY_QUORUM;
+    if (!strcasecmp(s, "ALL"))           return CASS_CONSISTENCY_ALL;
+    if (!strcasecmp(s, "LOCAL_QUORUM"))  return CASS_CONSISTENCY_LOCAL_QUORUM;
+    if (!strcasecmp(s, "LOCAL_ONE"))     return CASS_CONSISTENCY_LOCAL_ONE;
+    fprintf(stderr, "Unknown consistency level: %s\n"
+                    "Valid: ONE TWO THREE QUORUM ALL LOCAL_QUORUM LOCAL_ONE\n", s);
+    exit(1);
+}
+
 static void cass_connect(void) {
     g_cluster = cass_cluster_new();
     g_session = cass_session_new();
@@ -244,7 +259,7 @@ static void cass_connect(void) {
     cass_cluster_set_port(g_cluster, cfg.port);
     cass_cluster_set_num_threads_io(g_cluster, 4);
     cass_cluster_set_queue_size_io(g_cluster, 65536);
-    cass_cluster_set_consistency(g_cluster, CASS_CONSISTENCY_LOCAL_QUORUM);
+    cass_cluster_set_consistency(g_cluster, parse_consistency(cfg.consistency));
 
     /*
      * Pin the coordinator to the specified host.
@@ -761,7 +776,10 @@ static void usage(const char *prog) {
     printf("                    1.0 = real-time, preserves original arrival pattern\n");
     printf("                    0   = max rate, ignore timestamps (load phase)\n");
     printf("  --full-trace      run until trace file ends, ignore --duration\n");
-    printf("                    use this for load phase so all data is written\n\n");
+    printf("                    use this for load phase so all data is written\n");
+    printf("  --consistency CL  consistency level (default: ONE)\n");
+    printf("                    ONE LOCAL_ONE LOCAL_QUORUM QUORUM ALL\n");
+    printf("                    ONE matches YCSB default, recommended for RF=5\n\n");
     printf("LEAST / data size:\n");
     printf("  --least           prepend 0x00 to field0 (LEAST EC trigger)\n");
     printf("  --disable-ttl     ignore trace TTLs, write data permanently\n");
@@ -787,6 +805,7 @@ static void parse_args(int argc, char **argv) {
         {"threads",     required_argument, 0, 'n'},
         {"duration",    required_argument, 0, 'd'},
         {"speed",       required_argument, 0, 's'},
+        {"consistency", required_argument, 0, 'c'},
         {"least",       no_argument,       0, 'L'},
         {"disable-ttl", no_argument,       0, 'X'},
         {"full-trace",  no_argument,       0, 'F'},
@@ -795,7 +814,7 @@ static void parse_args(int argc, char **argv) {
         {0,0,0,0}
     };
     int c, idx;
-    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:LXFo:h",
+    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:c:LXFo:h",
                             opts, &idx)) != -1) {
         switch (c) {
         case 't': cfg.trace_path  = optarg;       break;
@@ -804,6 +823,7 @@ static void parse_args(int argc, char **argv) {
         case 'n': cfg.num_threads = atoi(optarg); break;
         case 'd': cfg.duration_sec= atoi(optarg); break;
         case 's': cfg.speed       = atof(optarg); break;
+        case 'c': cfg.consistency = optarg;       break;
         case 'L': cfg.least_mode  = 1;            break;
         case 'X': cfg.disable_ttl = 1;            break;
         case 'F': cfg.full_trace  = 1;            break;
@@ -842,6 +862,7 @@ int main(int argc, char **argv) {
     printf("Mode     : %s\n", cfg.least_mode
            ? "LEAST  (0x00 prefix on field0)"
            : "Default Cassandra (no prefix)");
+    printf("Consist  : %s\n", cfg.consistency);
     printf("TTL      : %s\n", cfg.disable_ttl
            ? "disabled  (data permanent, working set grows to disk)"
            : "from trace");

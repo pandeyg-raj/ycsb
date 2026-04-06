@@ -6,6 +6,23 @@ Build:
     gcc -O2 -o trace_driver trace_driver.c -lcassandra -lpthread -lm
 
 --------------------------------------------------------------------------------
+KEY CONCEPT: LOAD WINDOW vs BENCHMARK WINDOW
+--------------------------------------------------------------------------------
+
+When benchmarking for 1 hour (--duration 3600), the benchmark replays trace
+timestamps 0..3600s. The load phase must write ALL keys that appear as SETs
+in that window BEFORE the benchmark starts.
+
+To be safe, load an extra buffer beyond the benchmark duration:
+
+    Load window:  timestamps 0 .. (duration + load-buffer) = 0..4200s
+    Benchmark:    timestamps 0 .. duration                 = 0..3600s
+
+This guarantees every key the benchmark reads was already written during load.
+The trace is sorted by timestamp, so the reader stops as soon as it exceeds
+the load window — no need to scan the full 7-day file.
+
+--------------------------------------------------------------------------------
 TRACE MODE  (cluster46 or cluster50 — real Twitter production traces)
 --------------------------------------------------------------------------------
 
@@ -14,112 +31,128 @@ Recommended traces:
   cluster50.sort  —  52% GET, 67 KB avg value,  99 GB no-TTL working set
 
 Both exceed the 32 GB cgroup RAM limit with --disable-ttl, forcing disk reads.
+Decompress before use:  zstd -d cluster46.0.zst
 
 
 STEP 1 — LOAD PHASE
-  Purpose : populate the database with all SET operations from the trace.
-            GETs are skipped (--load). Runs at max rate (--speed 0).
-            Stops when the entire trace file has been read (--full-trace).
+  Writes only SET operations from the first (duration + load-buffer) seconds.
+  Skips all GETs (--load). Runs at max rate (--speed 0).
+  Stops automatically when the load window is exhausted (trace is sorted).
 
   LEAST cluster:
-    ./trace_driver --trace cluster46.sort --host 10.10.1.2 \
-                   --least --disable-ttl --consistency ALL  \
-                   --load --full-trace --speed 0            \
-                   --threads 64                             \
-                   --output /dev/null
+    ./trace_driver --trace cluster46.sort --host 10.10.1.1   \
+                   --least --disable-ttl --consistency ONE    \
+                   --load --load-buffer 600                   \
+                   --speed 0 --threads 64                     \
+                   --duration 3600 --output /dev/null
 
   Default Cassandra cluster:
-    ./trace_driver --trace cluster46.sort --host 10.10.1.2 \
-                   --disable-ttl --consistency ONE          \
-                   --load --full-trace --speed 0            \
-                   --threads 64                             \
-                   --output /dev/null
+    ./trace_driver --trace cluster46.sort --host 10.10.1.2   \
+                   --disable-ttl --consistency ONE            \
+                   --load --load-buffer 600                   \
+                   --speed 0 --threads 64                     \
+                   --duration 3600 --output /dev/null
 
-  After load, wait for compaction to settle:
+  What --load-buffer 600 means:
+    benchmark duration = 3600s
+    load window        = 3600 + 600 = 4200s
+    all SETs from timestamps 0..4200s are written
+    benchmark reads timestamps 0..3600s (all keys guaranteed to exist)
+
+  After load, wait for compaction to settle before benchmarking:
     sleep 60
+    nodetool compact ycsb usertable
 
-  Check database size on any node:
+  Check database size:
     nodetool cfstats ycsb.usertable | grep "Space used (live)"
 
 
 STEP 2 — BENCHMARK PHASE
-  Purpose : measure read/write latency under real arrival pattern.
-            Replays at real-time speed (--speed 1.0).
-            Runs for the first 1 hour of the trace (--duration 3600).
-            Both GET and SET operations are issued and measured.
+  Replays both GETs and SETs from the first --duration seconds of the trace.
+  Real-time pacing (--speed 1.0) preserves the original arrival pattern.
+  All keys are guaranteed to exist (written during load phase).
 
   LEAST cluster:
-    ./trace_driver --trace cluster46.sort --host 10.10.1.2 \
-                   --least --disable-ttl --consistency QUORUM  \
-                   --speed 1.0 --duration 3600              \
-                   --threads 64                             \
+    ./trace_driver --trace cluster46.sort --host 10.10.1.1   \
+                   --least --disable-ttl --consistency ONE    \
+                   --speed 1.0 --duration 3600 --threads 64  \
                    --output results/least_c46.csv
 
   Default Cassandra cluster:
-    ./trace_driver --trace cluster46.sort --host 10.10.1.2 \
-                   --disable-ttl --consistency ONE          \
-                   --speed 1.0 --duration 3600              \
-                   --threads 64                             \
+    ./trace_driver --trace cluster46.sort --host 10.10.1.2   \
+                   --disable-ttl --consistency ONE            \
+                   --speed 1.0 --duration 3600 --threads 64  \
                    --output results/default_c46.csv
+
+
+ALTERNATIVE: load entire trace (--full-trace)
+  Use this when you want to populate the full 7-day working set.
+  Note: --full-trace and --load-buffer cannot be used together.
+
+  ./trace_driver --trace cluster46.sort --host 10.10.1.1     \
+                 --least --disable-ttl --consistency ONE      \
+                 --load --full-trace                          \
+                 --speed 0 --threads 64 --output /dev/null
 
 
 --------------------------------------------------------------------------------
 MANUAL MODE  (synthetic workload — no trace file needed)
 --------------------------------------------------------------------------------
 
-Key format  : user0000000000 ... user{N-1}  (zero-padded, same as YCSB)
-Value format : 0x00 followed by (value_size - 1) 'a' bytes  (LEAST mode)
-               all 'a' bytes                                  (default mode)
+Key format  : user0000000000 .. user{N-1}  (zero-padded, same as YCSB)
+Value format : 0x00 + (value_size-1) 'a' bytes  (--least mode)
+               all 'a' bytes                     (default mode)
+Access       : uniform random over [0, num-keys)
+Concurrency  : closed loop — num_threads requests in flight at all times
 
-Workers run in closed loop — no pacing, concurrency = num_threads.
-Load stops automatically when all keys are written (no --duration needed).
+No load-buffer needed in manual mode — load writes all keys before benchmark.
 
 
 STEP 1 — MANUAL LOAD PHASE
-  Purpose : write exactly --num-keys unique keys of --value-size bytes each.
-            All threads compete for keys via atomic counter.
-            Stops when every key has been written.
+  All threads compete for keys via atomic counter.
+  Stops automatically when all --num-keys keys are written.
+  No --duration needed — driver exits when load is complete.
 
   LEAST cluster:
-    ./trace_driver --manual --load                          \
-                   --num-keys 10000000 --value-size 1024    \
-                   --least --consistency ONE                 \
-                   --host 10.10.1.1 --threads 64            \
+    ./trace_driver --manual --load                            \
+                   --num-keys 10000000 --value-size 1024      \
+                   --least --consistency ONE                   \
+                   --host 10.10.1.1 --threads 64              \
                    --output /dev/null
 
   Default Cassandra cluster:
-    ./trace_driver --manual --load                          \
-                   --num-keys 10000000 --value-size 1024    \
-                   --consistency ONE                         \
-                   --host 10.10.1.2 --threads 64            \
+    ./trace_driver --manual --load                            \
+                   --num-keys 10000000 --value-size 1024      \
+                   --consistency ONE                           \
+                   --host 10.10.1.2 --threads 64              \
                    --output /dev/null
 
-  After load, wait for compaction:
+  After load:
     sleep 60
+    nodetool compact ycsb usertable
 
 
 STEP 2 — MANUAL BENCHMARK PHASE
-  Purpose : closed-loop GET/SET mix over the keys written in load phase.
-            --read-ratio controls fraction of GETs (0.0 to 1.0).
-            Runs for --duration seconds.
-            Keys are picked uniformly at random from [0, num-keys).
+  Closed loop: each thread issues the next request immediately after the
+  previous one completes. --read-ratio controls GET fraction.
+  Reads only keys written during load (uniform random over num-keys).
 
   LEAST cluster:
-    ./trace_driver --manual                                  \
-                   --num-keys 10000000 --value-size 1024     \
-                   --read-ratio 0.68                         \
-                   --least --consistency ONE                  \
-                   --host 10.10.1.1 --threads 64             \
-                   --duration 3600                           \
+    ./trace_driver --manual                                   \
+                   --num-keys 10000000 --value-size 1024      \
+                   --read-ratio 0.68                          \
+                   --least --consistency ONE                   \
+                   --host 10.10.1.1 --threads 64              \
+                   --duration 3600                            \
                    --output results/least_manual.csv
 
   Default Cassandra cluster:
-    ./trace_driver --manual                                  \
-                   --num-keys 10000000 --value-size 1024     \
-                   --read-ratio 0.68                         \
-                   --consistency ONE                          \
-                   --host 10.10.1.2 --threads 64             \
-                   --duration 3600                           \
+    ./trace_driver --manual                                   \
+                   --num-keys 10000000 --value-size 1024      \
+                   --read-ratio 0.68                          \
+                   --consistency ONE                           \
+                   --host 10.10.1.2 --threads 64              \
+                   --duration 3600                            \
                    --output results/default_manual.csv
 
 
@@ -128,39 +161,54 @@ FLAG REFERENCE
 --------------------------------------------------------------------------------
 
 Connection:
-  --host        IP      coordinator node IP (default: 10.10.1.1)
-  --port        N       CQL port (default: 9042)
-  --consistency CL      ONE | LOCAL_ONE | LOCAL_QUORUM | QUORUM | ALL
-                        (default: ONE — matches YCSB, recommended for RF=5)
+  --host          IP    coordinator node IP (default: 10.10.1.1)
+  --port          N     CQL port (default: 9042)
+  --consistency   CL    ONE | LOCAL_ONE | LOCAL_QUORUM | QUORUM | ALL
+                        default: ONE (matches YCSB, recommended for RF=5)
 
-Workload control:
-  --threads     N       concurrent worker threads (default: 32)
-  --duration    N       seconds to run benchmark phase (default: 3600)
-  --speed       F       trace replay speed vs real-time (default: 1.0)
-                        1.0 = real-time, preserves original arrival pattern
-                        0   = max rate, no pacing (use for load phase)
+Workload:
+  --threads       N     concurrent workers (default: 32)
+  --duration      N     seconds to run benchmark / defines load window
+  --speed         F     1.0 = real-time replay (benchmark phase)
+                        0   = max rate, no pacing (load phase)
 
-Trace mode flags:
-  --trace       PATH    trace file (plain text, decompressed from .zst)
-  --load                skip all GETs, execute SETs only (load phase)
-  --full-trace          run until trace file ends, ignore --duration
-  --disable-ttl         ignore TTLs from trace, data stored permanently
-                        required to exceed 32 GB RAM and force disk reads
+Trace mode:
+  --trace         PATH  trace file (plain text, decompressed)
+  --load                SETs only, skip GETs (load phase)
+                        must be combined with exactly one of:
+  --load-buffer   N     load SETs from timestamps 0..(duration+N)
+                        benchmark then reads timestamps 0..duration
+                        N seconds of safety margin (e.g. 600 = 10 min)
+  --full-trace          load entire trace file regardless of duration
+                        cannot be combined with --load-buffer
+  --disable-ttl         ignore TTLs, store data permanently
+                        required to exceed RAM limit and force disk reads
 
-Manual mode flags:
-  --manual              synthetic workload, no trace file needed
+Manual mode:
+  --manual              synthetic workload, no trace file
   --load                write all --num-keys keys (stops when done)
-  --num-keys    N       number of unique keys (default: 1000000)
-  --value-size  N       value size in bytes (default: 1024)
-  --read-ratio  F       fraction of GETs in benchmark 0.0-1.0 (default: 0.5)
+  --num-keys      N     unique keys to write/read (default: 1000000)
+  --value-size    N     value size in bytes (default: 1024)
+  --read-ratio    F     GET fraction in benchmark 0.0..1.0 (default: 0.5)
 
-LEAST flags:
-  --least               prepend 0x00 byte to field0 (LEAST EC trigger)
-                        omit this flag when running against default Cassandra
+LEAST:
+  --least               prepend 0x00 to field0 (LEAST EC trigger)
+                        omit when running against default Cassandra
 
 Output:
-  --output      PATH    latency timeseries CSV written every 10 seconds
+  --output        PATH  CSV written every 10 seconds
                         use /dev/null during load phase
+
+
+--------------------------------------------------------------------------------
+ERROR MESSAGES
+--------------------------------------------------------------------------------
+
+  ERROR: --load-buffer and --full-trace cannot both be set.
+  -> pick one: either load the full file or limit by time window
+
+  ERROR: --load requires either --full-trace or --load-buffer N.
+  -> you must tell the driver when to stop loading
 
 
 --------------------------------------------------------------------------------
@@ -185,31 +233,34 @@ OUTPUT CSV FORMAT
 --------------------------------------------------------------------------------
 
 Columns:
-  time            wall clock timestamp (HH:MM:SS)
+  time            wall clock (HH:MM:SS)
   elapsed_s       seconds since start
-  progress_pct    % of work done (keys written in load, ops in benchmark)
+  progress_pct    % complete (keys written in load / ops in benchmark)
   eta             estimated time to completion
   get_count       cumulative GETs executed
   get_mean_us     mean GET latency in microseconds
   set_count       cumulative SETs executed
   set_mean_us     mean SET latency in microseconds
-  errors          cumulative error count
+  errors          cumulative errors
   ops_per_sec     throughput over last 10 seconds
 
-Final summary printed to stdout includes p50 / p99 / p999 latency.
+Final summary on stdout: p50 / p99 / p999 per operation type.
 
 
 --------------------------------------------------------------------------------
-CHECKING DATABASE SIZE AFTER LOAD
+POST-LOAD CHECKS
 --------------------------------------------------------------------------------
 
-  # Space used on disk
+  # Disk space used
   nodetool cfstats ycsb.usertable | grep "Space used (live)"
 
-  # SSTable count (high count = compaction not finished, wait longer)
+  # SSTable count (wait for compaction if count is high)
   nodetool cfstats ycsb.usertable | grep "SSTable count"
 
-  # Trigger manual compaction if needed
+  # Trigger compaction manually if needed
   nodetool compact ycsb usertable
+
+  # Confirm RAM pressure (should be above 32 GB for disk reads)
+  free -h
 
 ================================================================================

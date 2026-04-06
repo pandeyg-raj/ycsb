@@ -150,6 +150,7 @@ static volatile uint64_t g_total_gets  = 0;
 
 /* manual load progress */
 static volatile uint64_t g_next_key = 0;
+static volatile uint64_t g_popped   = 0;   /* total records popped from queue */
 
 /* timing */
 static uint64_t g_t_start = 0;
@@ -585,6 +586,7 @@ static void *worker_fn(void *arg) {
             if (g_queue.done && spins > 1000) goto done;
             if (++spins > 100) sleep_ns(100000);
         }
+        __atomic_fetch_add(&g_popped, 1, __ATOMIC_RELAXED);
 
         uint64_t t0 = now_ns();
 
@@ -1132,6 +1134,8 @@ int main(int argc, char **argv) {
             printf("DEBUG thread %2d: sets=%lu\n",
                    i, (unsigned long)g_stats[i].set.count);
         }
+        printf("DEBUG total popped from queue: %lu\n",
+               (unsigned long)__atomic_load_n(&g_popped, __ATOMIC_RELAXED));
         printf("DEBUG total sets executed: %lu  prescan: %lu  diff: %ld\n",
                (unsigned long)dbg_sets,
                (unsigned long)g_total_sets,

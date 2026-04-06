@@ -513,6 +513,8 @@ static void run_reader(void) {
     uint64_t first_trace_ts = UINT64_MAX;
     uint64_t start_wall     = now_ns();
     uint64_t submitted      = 0;
+    uint64_t submitted_sets = 0;
+    uint64_t submitted_gets = 0;
     uint64_t skipped        = 0;
     uint64_t lines_read     = 0;
 
@@ -554,13 +556,18 @@ static void run_reader(void) {
             sleep_ns(10000);
 
         submitted++;
+        if (rec.op == OP_SET) submitted_sets++;
+        else if (rec.op == OP_GET) submitted_gets++;
     }
 
     fclose(fp);
     g_queue.done = 1;
-    printf("\nTrace done: lines_read=%lu  submitted=%lu  skipped=%lu\n",
+    printf("\nTrace done: lines_read=%lu  submitted=%lu"
+           "  sets=%lu  gets=%lu  skipped=%lu\n",
            (unsigned long)lines_read,
            (unsigned long)submitted,
+           (unsigned long)submitted_sets,
+           (unsigned long)submitted_gets,
            (unsigned long)skipped);
 }
 
@@ -1110,7 +1117,7 @@ int main(int argc, char **argv) {
         /* reader runs on main thread */
         run_reader();
 
-        /* wait for workers to drain the queue */
+        /* drain the queue */
         while (!g_stop) {
             if (__atomic_load_n(&g_queue.head, __ATOMIC_RELAXED) ==
                 __atomic_load_n(&g_queue.tail, __ATOMIC_RELAXED)) break;
@@ -1119,6 +1126,18 @@ int main(int argc, char **argv) {
         g_stop = 1;
         for (int i = 0; i < cfg.num_threads; i++)
             pthread_join(workers[i].tid, NULL);
+
+        /* debug: show per-thread counts and total */
+        uint64_t dbg_sets = 0;
+        for (int i = 0; i < cfg.num_threads; i++) {
+            dbg_sets += g_stats[i].set.count;
+            printf("DEBUG thread %2d: sets=%lu\n",
+                   i, (unsigned long)g_stats[i].set.count);
+        }
+        printf("DEBUG total sets executed: %lu  prescan: %lu  diff: %ld\n",
+               (unsigned long)dbg_sets,
+               (unsigned long)g_total_sets,
+               (long)g_total_sets - (long)dbg_sets);
     }
 
     pthread_join(rep_tid, NULL);

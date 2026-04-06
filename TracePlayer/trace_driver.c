@@ -669,7 +669,7 @@ static void do_report(void) {
 
     /* Format ETA nicely */
     char eta_buf[32];
-    if (eta_s <= 0 || total == 0)
+    if (eta_s <= 0 || ops_total == 0)
         snprintf(eta_buf, sizeof(eta_buf), "unknown");
     else if (eta_s < 60)
         snprintf(eta_buf, sizeof(eta_buf), "%.0fs",  eta_s);

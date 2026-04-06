@@ -194,6 +194,11 @@ typedef struct {
     int         full_trace;     /* 1 = run until trace file ends, ignore --duration */
     const char *consistency;    /* CL string: ONE, LOCAL_QUORUM, QUORUM, ALL */
     int         load_mode;      /* 1 = skip GETs, only execute SETs (load phase) */
+    /* ── manual mode ── */
+    int         manual;         /* 1 = ignore trace, use synthetic workload */
+    uint64_t    num_keys;       /* number of unique keys (load writes all, bench reads all) */
+    int         value_size;     /* fixed value size in bytes for manual mode */
+    double      read_ratio;     /* fraction of ops that are GETs in benchmark (0.0-1.0) */
 } Config;
 
 static Config cfg = {
@@ -209,6 +214,10 @@ static Config cfg = {
     .full_trace   = 0,
     .consistency  = "ONE",
     .load_mode    = 0,
+    .manual       = 0,
+    .num_keys     = 1000000,    /* 1M keys default */
+    .value_size   = 1024,       /* 1 KB default */
+    .read_ratio   = 0.5,        /* 50/50 default */
 };
 
 /* ── Shared globals ──────────────────────────────────────────────────────────── */
@@ -226,9 +235,12 @@ static ThreadStats  *g_stats    = NULL;
 static char        **g_vbufs    = NULL;   /* value buffers, one per thread */
 
 /* Progress tracking — written by reader, read by reporter */
-static volatile uint64_t g_total_lines  = 0;  /* pre-counted before replay */
-static volatile uint64_t g_total_gets   = 0;  /* GET lines in trace */
-static volatile uint64_t g_total_sets   = 0;  /* SET lines in trace */
+static volatile uint64_t g_total_lines  = 0;
+static volatile uint64_t g_total_gets   = 0;
+static volatile uint64_t g_total_sets   = 0;
+
+/* Manual mode: atomic counter for next key to write during load */
+static volatile uint64_t g_next_key     = 0;
 
 /* ── Cassandra setup ─────────────────────────────────────────────────────────── */
 
@@ -445,6 +457,123 @@ done:
     return NULL;
 }
 
+/* ── Manual mode workers ─────────────────────────────────────────────────────── */
+
+/*
+ * Key format: "user%010lu"  (zero-padded 10-digit number)
+ * Matches YCSB key format so it lands in the same usertable schema.
+ * Example: user0000000000, user0000000001, ..., user0099999999
+ */
+static inline void make_key(char *buf, uint64_t idx) {
+    snprintf(buf, 32, "user%010lu", (unsigned long)idx);
+}
+
+/*
+ * Manual load worker.
+ *
+ * Threads compete for keys via an atomic counter (g_next_key).
+ * Each thread claims the next available key index and writes it.
+ * No queue, no pacing — pure closed-loop write until all keys done.
+ *
+ * Progress is naturally tracked via g_next_key.
+ */
+static void *manual_load_worker(void *arg) {
+    Worker      *w    = (Worker *)arg;
+    ThreadStats *ts   = &g_stats[w->id];
+    char        *vbuf = g_vbufs[w->id];
+    int          vsz  = cfg.value_size;
+    char         key[32];
+
+    while (!g_stop) {
+        /* atomically claim the next key index */
+        uint64_t idx = __atomic_fetch_add(&g_next_key, 1, __ATOMIC_RELAXED);
+        if (idx >= cfg.num_keys)
+            break;   /* all keys written */
+
+        make_key(key, idx);
+
+        uint64_t t0 = now_ns();
+
+        CassStatement *s = cass_prepared_bind(g_insert);
+        cass_statement_bind_string(s, 0, key);
+        cass_statement_bind_string_n(s, 1, vbuf, (size_t)vsz);
+        CassFuture *f = cass_session_execute(g_session, s);
+        cass_future_wait(f);
+        CassError e = cass_future_error_code(f);
+        if (e != CASS_OK) {
+            ts->set.errors++;
+            if (e == CASS_ERROR_SERVER_WRITE_TIMEOUT) ts->set.timeouts++;
+        }
+        cass_future_free(f);
+        cass_statement_free(s);
+        tracker_record(&ts->set, (now_ns() - t0) / 1000.0);
+    }
+    return NULL;
+}
+
+/*
+ * Manual benchmark worker (closed loop).
+ *
+ * Each thread independently picks a random key from [0, num_keys)
+ * and issues a GET or SET based on read_ratio.
+ *
+ * Closed loop: no queue, no pacing, each thread issues the next
+ * request immediately after the previous one completes.
+ * Concurrency = num_threads.
+ */
+static void *manual_bench_worker(void *arg) {
+    Worker      *w    = (Worker *)arg;
+    ThreadStats *ts   = &g_stats[w->id];
+    char        *vbuf = g_vbufs[w->id];
+    int          vsz  = cfg.value_size;
+    char         key[32];
+    unsigned int seed = (unsigned int)(w->id + 1) * 2654435761u;  /* per-thread seed */
+
+    while (!g_stop) {
+        /* uniform random key from the load phase key space */
+        uint64_t idx = ((uint64_t)rand_r(&seed) * (uint64_t)rand_r(&seed))
+                       % cfg.num_keys;
+        make_key(key, idx);
+
+        /* decide GET or SET based on read_ratio */
+        double r = (double)rand_r(&seed) / (double)RAND_MAX;
+
+        uint64_t t0 = now_ns();
+
+        if (r < cfg.read_ratio) {
+            /* GET */
+            CassStatement *s = cass_prepared_bind(g_select);
+            cass_statement_bind_string(s, 0, key);
+            CassFuture *f = cass_session_execute(g_session, s);
+            cass_future_wait(f);
+            CassError e = cass_future_error_code(f);
+            if (e != CASS_OK) {
+                ts->get.errors++;
+                if (e == CASS_ERROR_SERVER_READ_TIMEOUT) ts->get.timeouts++;
+            }
+            cass_future_free(f);
+            cass_statement_free(s);
+            tracker_record(&ts->get, (now_ns() - t0) / 1000.0);
+        } else {
+            /* SET */
+            CassStatement *s = cass_prepared_bind(g_insert);
+            cass_statement_bind_string(s, 0, key);
+            cass_statement_bind_string_n(s, 1, vbuf, (size_t)vsz);
+            CassFuture *f = cass_session_execute(g_session, s);
+            cass_future_wait(f);
+            CassError e = cass_future_error_code(f);
+            if (e != CASS_OK) {
+                ts->set.errors++;
+                if (e == CASS_ERROR_SERVER_WRITE_TIMEOUT) ts->set.timeouts++;
+            }
+            cass_future_free(f);
+            cass_statement_free(s);
+            tracker_record(&ts->set, (now_ns() - t0) / 1000.0);
+        }
+    }
+    return NULL;
+}
+
 /* ── Trace parsing ───────────────────────────────────────────────────────────── */
 
 static inline OpType parse_op(const char *s) {
@@ -631,13 +760,19 @@ static void do_report(void) {
      * since workers may still be draining a backlog of pending SETs.
      */
     uint64_t ops_done, ops_total;
-    if (cfg.load_mode) {
-        /* only SETs run during load — GETs are skipped */
+    if (cfg.manual && cfg.load_mode) {
+        /* manual load: progress = keys written / total keys */
+        ops_done  = __atomic_load_n(&g_next_key, __ATOMIC_RELAXED);
+        if (ops_done > cfg.num_keys) ops_done = cfg.num_keys;
+        ops_total = cfg.num_keys;
+    } else if (cfg.load_mode) {
+        /* trace load: only SETs run */
         ops_done  = sc;
         ops_total = g_total_sets;
     } else {
+        /* benchmark (trace or manual): GETs + SETs */
         ops_done  = gc + sc;
-        ops_total = g_total_gets + g_total_sets;
+        ops_total = cfg.manual ? 0 : (g_total_gets + g_total_sets);
     }
 
     double pct = (ops_total > 0)
@@ -792,7 +927,12 @@ static void usage(const char *prog) {
     printf("  --host     IP     coordinator node IP (default: 10.10.1.1)\n");
     printf("  --port     N      CQL port (default: 9042)\n");
     printf("  Schema is fixed: ycsb.usertable, RF=5, DURABLE_WRITES=true\n\n");
-    printf("Workload:\n");
+    printf("Manual mode (no trace needed):\n");
+    printf("  --manual          synthetic workload, ignores --trace\n");
+    printf("  --num-keys   N    unique keys to write/read (default: 1000000)\n");
+    printf("  --value-size N    fixed value size in bytes  (default: 1024)\n");
+    printf("  --read-ratio F    fraction of GETs in benchmark (default: 0.5)\n\n");
+    printf("Trace mode:\n");
     printf("  --threads  N      concurrent workers (default: 32)\n");
     printf("  --duration N      seconds to run (default: 3600 = 1 hour)\n");
     printf("  --speed    F      replay speed vs real-time (default: 1.0)\n");
@@ -809,8 +949,15 @@ static void usage(const char *prog) {
     printf("                    use this to push working set past 32 GB RAM\n\n");
     printf("Output:\n");
     printf("  --output   PATH   latency timeseries CSV (default: latency.csv)\n\n");
-    printf("Examples:\n");
-    printf("  # Load phase: SETs only, max rate, run until trace ends\n");
+    printf("  # Manual load: write 10M keys of 1KB each\n");
+    printf("  %s --manual --load --num-keys 10000000 --value-size 1024 \\\n", prog);
+    printf("       --least --host 10.10.1.1 --threads 64 \\\n");
+    printf("       --output /dev/null\n\n");
+    printf("  # Manual benchmark: 68%% reads, closed loop, 1 hour\n");
+    printf("  %s --manual --num-keys 10000000 --value-size 1024 \\\n", prog);
+    printf("       --read-ratio 0.68 --least --host 10.10.1.1 \\\n");
+    printf("       --threads 64 --duration 3600 --output least_manual.csv\n\n");
+    printf("  # Trace load phase: SETs only, max rate, run until trace ends\n");
     printf("  %s --trace cluster50.sort --host 10.10.1.1 \\\n", prog);
     printf("       --least --disable-ttl --consistency ONE \\\n");
     printf("       --load --full-trace --speed 0 --threads 64 \\\n");
@@ -835,32 +982,41 @@ static void parse_args(int argc, char **argv) {
         {"disable-ttl", no_argument,       0, 'X'},
         {"full-trace",  no_argument,       0, 'F'},
         {"load",        no_argument,       0, 'W'},
+        /* manual mode */
+        {"manual",      no_argument,       0, 'M'},
+        {"num-keys",    required_argument, 0, 'K'},
+        {"value-size",  required_argument, 0, 'V'},
+        {"read-ratio",  required_argument, 0, 'R'},
         {"output",      required_argument, 0, 'o'},
         {"help",        no_argument,       0, 'h'},
         {0,0,0,0}
     };
     int c, idx;
-    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:c:LXFWo:h",
+    while ((c = getopt_long(argc, argv, "t:H:p:n:d:s:c:LXFWo:MK:V:R:h",
                             opts, &idx)) != -1) {
         switch (c) {
-        case 't': cfg.trace_path  = optarg;       break;
-        case 'H': cfg.hosts       = optarg;       break;
-        case 'p': cfg.port        = atoi(optarg); break;
-        case 'n': cfg.num_threads = atoi(optarg); break;
-        case 'd': cfg.duration_sec= atoi(optarg); break;
-        case 's': cfg.speed       = atof(optarg); break;
-        case 'c': cfg.consistency = optarg;       break;
-        case 'L': cfg.least_mode  = 1;            break;
-        case 'X': cfg.disable_ttl = 1;            break;
-        case 'F': cfg.full_trace  = 1;            break;
-        case 'W': cfg.load_mode   = 1;            break;
-        case 'o': cfg.output_csv  = optarg;       break;
+        case 't': cfg.trace_path  = optarg;              break;
+        case 'H': cfg.hosts       = optarg;              break;
+        case 'p': cfg.port        = atoi(optarg);        break;
+        case 'n': cfg.num_threads = atoi(optarg);        break;
+        case 'd': cfg.duration_sec= atoi(optarg);        break;
+        case 's': cfg.speed       = atof(optarg);        break;
+        case 'c': cfg.consistency = optarg;              break;
+        case 'L': cfg.least_mode  = 1;                   break;
+        case 'X': cfg.disable_ttl = 1;                   break;
+        case 'F': cfg.full_trace  = 1;                   break;
+        case 'W': cfg.load_mode   = 1;                   break;
+        case 'M': cfg.manual      = 1;                   break;
+        case 'K': cfg.num_keys    = (uint64_t)atoll(optarg); break;
+        case 'V': cfg.value_size  = atoi(optarg);        break;
+        case 'R': cfg.read_ratio  = atof(optarg);        break;
+        case 'o': cfg.output_csv  = optarg;              break;
         case 'h': usage(argv[0]); exit(0);
         default:  usage(argv[0]); exit(1);
         }
     }
-    if (!cfg.trace_path) {
-        fprintf(stderr, "ERROR: --trace is required\n\n");
+    if (!cfg.manual && !cfg.trace_path) {
+        fprintf(stderr, "ERROR: --trace is required (or use --manual)\n\n");
         usage(argv[0]); exit(1);
     }
 }
@@ -874,69 +1030,87 @@ int main(int argc, char **argv) {
 
     printf("══════════════════════════════════════════════════════════\n");
     printf("LEAST Trace Driver\n");
-    printf("Trace    : %s\n", cfg.trace_path);
+    if (cfg.manual) {
+        printf("Mode     : MANUAL (synthetic workload, no trace)\n");
+        printf("Phase    : %s\n", cfg.load_mode
+               ? "LOAD  (write all keys)"
+               : "BENCHMARK (closed loop, read/write mix)");
+        printf("Keys     : %lu\n", (unsigned long)cfg.num_keys);
+        printf("Val size : %d bytes\n", cfg.value_size);
+        if (!cfg.load_mode)
+            printf("Read ratio: %.2f  (%.0f%% GET / %.0f%% SET)\n",
+                   cfg.read_ratio,
+                   cfg.read_ratio * 100.0,
+                   (1.0 - cfg.read_ratio) * 100.0);
+    } else {
+        printf("Trace    : %s\n", cfg.trace_path);
+        printf("Phase    : %s\n", cfg.load_mode
+               ? "LOAD  (SETs only, GETs skipped)"
+               : "BENCHMARK  (GETs + SETs measured)");
+        if (cfg.full_trace)
+            printf("Duration : until trace ends (--full-trace)\n");
+        else
+            printf("Duration : %ds (%.1f hours)\n",
+                   cfg.duration_sec, cfg.duration_sec / 3600.0);
+        printf("Speed    : %.1fx%s\n", cfg.speed,
+               cfg.speed == 0.0 ? " (max rate)" :
+               cfg.speed == 1.0 ? " (real-time)" : "");
+        printf("TTL      : %s\n", cfg.disable_ttl
+               ? "disabled" : "from trace");
+    }
     printf("Host     : %s:%d\n", cfg.hosts, cfg.port);
     printf("Keyspace : ycsb.usertable  (RF=5, DURABLE_WRITES=true)\n");
     printf("Threads  : %d\n", cfg.num_threads);
-    if (cfg.full_trace)
-        printf("Duration : until trace ends (--full-trace)\n");
-    else
-        printf("Duration : %ds (%.1f hours)\n",
-               cfg.duration_sec, cfg.duration_sec / 3600.0);
-    printf("Speed    : %.1fx%s\n", cfg.speed,
-           cfg.speed == 0.0 ? " (max rate — load phase)" :
-           cfg.speed == 1.0 ? " (real-time — benchmark phase)" : "");
-    printf("Mode     : %s\n", cfg.least_mode
+    if (!cfg.manual && cfg.full_trace)
+        printf("Duration : until trace ends\n");
+    else if (!cfg.manual)
+        printf("Duration : %ds\n", cfg.duration_sec);
+    printf("EC Mode  : %s\n", cfg.least_mode
            ? "LEAST  (0x00 prefix on field0)"
            : "Default Cassandra (no prefix)");
     printf("Consist  : %s\n", cfg.consistency);
-    printf("Phase    : %s\n", cfg.load_mode
-           ? "LOAD  (SETs only, GETs skipped)"
-           : "BENCHMARK  (GETs + SETs measured)");
-    printf("TTL      : %s\n", cfg.disable_ttl
-           ? "disabled  (data permanent, working set grows to disk)"
-           : "from trace");
     printf("Output   : %s\n", cfg.output_csv);
     printf("══════════════════════════════════════════════════════════\n\n");
 
     cass_connect();
 
-    /* Pre-scan trace to count lines — gives progress % and ETA in reporter */
-    prescan_trace();
+    /* In manual mode skip prescan; in trace mode prescan the file */
+    if (cfg.manual) {
+        g_total_sets = cfg.num_keys;   /* progress denominator for load */
+        g_total_gets = 0;
+        g_total_lines= cfg.num_keys;
+        g_max_value_size = cfg.value_size;
+        printf("Manual mode: %lu keys × %d bytes = %.1f GB\n\n",
+               (unsigned long)cfg.num_keys,
+               cfg.value_size,
+               (double)cfg.num_keys * cfg.value_size / (1024.0*1024.0*1024.0));
+    } else {
+        prescan_trace();
+    }
 
     /* Allocate per-thread resources */
     g_stats = calloc(cfg.num_threads, sizeof(ThreadStats));
     g_vbufs = malloc(cfg.num_threads * sizeof(char *));
-    int buf_size = g_max_value_size + 1;   /* +1 for null terminator */
+    int buf_size = g_max_value_size + 1;
     for (int i = 0; i < cfg.num_threads; i++) {
         tracker_init(&g_stats[i].get);
         tracker_init(&g_stats[i].set);
-
-        /* Allocate exactly max_value_size+1 bytes — sized from prescan,
-         * so no arbitrary cap and no truncation of large values. */
         g_vbufs[i] = malloc(buf_size);
         if (!g_vbufs[i]) { perror("malloc vbuf"); exit(1); }
-
         if (cfg.least_mode) {
-            /*
-             * LEAST EC trigger: 0x00 at byte 0, rest is 'a'.
-             *   vbuf[0]       = 0x00  ← LEAST reads this to decide EC
-             *   vbuf[1..N-1]  = 'a'
-             */
             g_vbufs[i][0] = '\x00';
             memset(g_vbufs[i] + 1, 'a', buf_size - 2);
         } else {
-            /* Plain Cassandra: all 'a' */
             memset(g_vbufs[i], 'a', buf_size - 1);
         }
         g_vbufs[i][buf_size - 1] = '\0';
     }
-
     printf("Value buffer: %d bytes/thread × %d threads = %.1f MB\n\n",
            buf_size, cfg.num_threads,
            (double)buf_size * cfg.num_threads / (1024.0 * 1024.0));
 
-    queue_init(&g_queue, QUEUE_CAPACITY);
+    if (!cfg.manual)
+        queue_init(&g_queue, QUEUE_CAPACITY);
 
     /* CSV header */
     if (cfg.output_csv && strcmp(cfg.output_csv, "/dev/null") != 0) {
@@ -951,33 +1125,45 @@ int main(int argc, char **argv) {
 
     g_t_start = now_ns();
 
-    /* Start workers */
+    /* Start workers — different function for manual vs trace mode */
     Worker *workers = malloc(cfg.num_threads * sizeof(Worker));
+    void *(*wfn)(void *) = cfg.manual
+        ? (cfg.load_mode ? manual_load_worker : manual_bench_worker)
+        : worker_fn;
     for (int i = 0; i < cfg.num_threads; i++) {
         workers[i].id = i;
-        pthread_create(&workers[i].tid, NULL, worker_fn, &workers[i]);
+        pthread_create(&workers[i].tid, NULL, wfn, &workers[i]);
     }
 
     /* Start reporter and duration timer */
     pthread_t rep_tid, timer_tid;
-    pthread_create(&rep_tid,   NULL, reporter_fn, NULL);
-    pthread_create(&timer_tid, NULL, timer_fn,    NULL);
+    pthread_create(&rep_tid, NULL, reporter_fn, NULL);
+    /* Duration timer: not needed for manual load (workers self-terminate
+     * when all keys are written). Used for benchmark phases only. */
+    if (!(cfg.manual && cfg.load_mode))
+        pthread_create(&timer_tid, NULL, timer_fn, NULL);
 
-    /* Run trace reader on main thread */
-    run_reader();
-
-    /* Wait for queue to drain */
-    while (!g_stop) {
-        if (__atomic_load_n(&g_queue.head, __ATOMIC_RELAXED) ==
-            __atomic_load_n(&g_queue.tail, __ATOMIC_RELAXED)) break;
-        sleep_ns(1000000);  /* 1 ms */
+    if (cfg.manual) {
+        /* Manual mode: workers are self-contained, just wait for them */
+        for (int i = 0; i < cfg.num_threads; i++)
+            pthread_join(workers[i].tid, NULL);
+    } else {
+        /* Trace mode: reader runs on main thread, feeds the ring queue */
+        run_reader();
+        /* Wait for queue to drain */
+        while (!g_stop) {
+            if (__atomic_load_n(&g_queue.head, __ATOMIC_RELAXED) ==
+                __atomic_load_n(&g_queue.tail, __ATOMIC_RELAXED)) break;
+            sleep_ns(1000000);
+        }
+        g_stop = 1;
+        for (int i = 0; i < cfg.num_threads; i++)
+            pthread_join(workers[i].tid, NULL);
     }
-    g_stop = 1;
 
-    for (int i = 0; i < cfg.num_threads; i++)
-        pthread_join(workers[i].tid, NULL);
     pthread_join(rep_tid, NULL);
-    pthread_cancel(timer_tid);
+    if (!(cfg.manual && cfg.load_mode))
+        pthread_cancel(timer_tid);
 
     print_summary();
 

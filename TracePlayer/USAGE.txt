@@ -264,3 +264,59 @@ POST-LOAD CHECKS
   free -h
 
 ================================================================================
+
+--------------------------------------------------------------------------------
+TRACE FILTERING  (filter_trace.py — run once before any benchmarking)
+--------------------------------------------------------------------------------
+
+The raw trace has two problems that contaminate benchmark results:
+
+  1. GETs for keys that were SET before recording started — these return
+     empty results and don't exercise the SSTable read path LEAST optimizes.
+
+  2. SETs with very small values (< 100 bytes) — small values are not
+     interesting for LEAST's erasure coding benefit. Their GETs are also
+     removed.
+
+filter_trace.py fixes both in a single pass and produces a clean trace
+covering only the load window (0..bench_duration+load_buffer seconds).
+
+Usage:
+    python3 filter_trace.py <input> <output> <bench_s> <buffer_s> [min_vsz]
+
+    input     : raw trace file (e.g. cluster46.sort)
+    output    : filtered output (e.g. cluster46.filtered)
+    bench_s   : benchmark duration in seconds (e.g. 3600)
+    buffer_s  : load buffer in seconds (e.g. 600)
+    min_vsz   : minimum value size to keep in bytes (default: 100)
+
+Example:
+    python3 filter_trace.py cluster46.sort cluster46.filtered 3600 600 100
+
+Output:
+    Lines read    :   18,308,074
+    Lines kept    :   14,203,891
+
+    Dropped — GET with no prior SET    :  2,341,205
+    Dropped — SET/GET value < 100B     :  1,762,978
+
+    Valid keys loaded into memory      :  4,821,330
+    Output file   : cluster46.filtered
+
+The filtered file replaces the raw trace in all driver commands.
+Use --full-trace for load (file already ends at load window boundary).
+
+After filtering, workflow becomes:
+    # Load — read entire filtered file
+    ./trace_driver --trace cluster46.filtered --host 10.10.1.1 \
+                   --least --disable-ttl --consistency ONE \
+                   --load --full-trace \
+                   --speed 0 --threads 64 --output /dev/null
+
+    # Benchmark — replay first bench_s seconds
+    ./trace_driver --trace cluster46.filtered --host 10.10.1.1 \
+                   --least --disable-ttl --consistency ONE \
+                   --speed 1.0 --duration 3600 --threads 64 \
+                   --output results/least_c46.csv
+
+================================================================================

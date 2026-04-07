@@ -54,7 +54,9 @@ def parse_time(ts_str, date_str=None):
 def load_csv(path):
     df = pd.read_csv(path)
     today = datetime.now().strftime('%Y-%m-%d')
-    df['dt'] = df['time'].apply(lambda t: parse_time(t, today))
+    # handle both column names: client CSV uses 'time', node CSV uses 'timestamp'
+    time_col = 'time' if 'time' in df.columns else 'timestamp'
+    df['dt'] = df[time_col].apply(lambda t: parse_time(t, today))
     return df
 
 print(f'Loading client CSV: {args.client}')

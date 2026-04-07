@@ -75,11 +75,12 @@ typedef struct { int id; pthread_t tid; } Worker;
 /* ── Ring queue (SPMC: one producer reader thread, N consumer workers) ────────── */
 
 typedef struct {
-    TraceRecord     *buf;
-    volatile uint64_t head;
-    volatile uint64_t tail;
-    uint64_t          mask;
-    volatile int      done;
+    TraceRecord       *buf;
+    volatile uint64_t  head;   /* producer writes here */
+    volatile uint64_t  tail;   /* consumers read from here */
+    uint64_t           mask;   /* capacity - 1 */
+    volatile int       done;   /* set when producer is finished */
+    pthread_mutex_t    pop_mu; /* guards tail — makes pop thread-safe */
 } RingQueue;
 
 /* ── Config ──────────────────────────────────────────────────────────────────── */
@@ -209,32 +210,40 @@ static void queue_init(RingQueue *q, uint64_t cap) {
     q->head = q->tail = 0;
     q->mask = cap - 1;
     q->done = 0;
+    pthread_mutex_init(&q->pop_mu, NULL);
     if (!q->buf) { perror("malloc queue"); exit(1); }
 }
 
 static inline bool queue_push(RingQueue *q, const TraceRecord *r) {
     uint64_t head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);
     uint64_t tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
-    /* full check: use absolute difference, not masked comparison */
-    if (head - tail >= (uint64_t)(q->mask + 1)) return false;
+    if (head - tail >= (uint64_t)(q->mask + 1)) return false;  /* full */
     q->buf[head & q->mask] = *r;
     __atomic_store_n(&q->head, head + 1, __ATOMIC_RELEASE);
     return true;
 }
 
+/*
+ * Thread-safe pop for multiple consumers.
+ *
+ * We use a mutex rather than CAS because CAS-before-read has a race:
+ * after CAS increments tail, the producer can push 8192 more items and
+ * overwrite the slot before the winning thread reads it.
+ *
+ * The mutex is held for ~1µs. Workers then spend 5–50ms in Cassandra,
+ * so contention is negligible.
+ */
 static inline bool queue_pop(RingQueue *q, TraceRecord *out) {
-    uint64_t tail, head;
-    do {
-        tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
-        head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
-        /* empty check: absolute counters, no masking needed */
-        if (tail == head) return false;
-    } while (!__atomic_compare_exchange_n(&q->tail, &tail, tail + 1,
-                                          /*weak=*/true,
-                                          __ATOMIC_ACQ_REL,
-                                          __ATOMIC_ACQUIRE));
-    /* CAS won — we exclusively own slot tail */
+    pthread_mutex_lock(&q->pop_mu);
+    uint64_t tail = q->tail;
+    uint64_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+    if (tail == head) {
+        pthread_mutex_unlock(&q->pop_mu);
+        return false;
+    }
     *out = q->buf[tail & q->mask];
+    q->tail = tail + 1;
+    pthread_mutex_unlock(&q->pop_mu);
     return true;
 }
 

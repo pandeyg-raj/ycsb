@@ -45,7 +45,6 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -118,8 +117,7 @@ public class TraceWorkload extends Workload {
     System.err.println("[TraceWorkload] Load value size source : " + loadSizeProp);
 
     traceEntries = new ArrayList<>();
-    // Use LinkedHashMap to preserve first-seen order for load keys
-    Map<String, TraceEntry> writeKeySeen = new LinkedHashMap<>();
+    loadKeys     = new ArrayList<>();
 
     try (BufferedReader br = new BufferedReader(new FileReader(traceFile))) {
       String line;
@@ -144,9 +142,9 @@ public class TraceWorkload extends Workload {
           TraceEntry entry = new TraceEntry(ts, key, valueSize, op);
           traceEntries.add(entry);
 
-          // Collect unique write keys for the load phase
-          if (isWrite(op) && !writeKeySeen.containsKey(key)) {
-            writeKeySeen.put(key, entry);
+          // Collect ALL write entries for load phase (no deduplication)
+          if (isWrite(op)) {
+            loadKeys.add(entry);
           }
         } catch (NumberFormatException e) {
           System.err.println("[TraceWorkload] Skipping line " + lineNum + " (parse error): " + e.getMessage());
@@ -160,17 +158,17 @@ public class TraceWorkload extends Workload {
       throw new WorkloadException("Trace file is empty or has no valid entries: " + traceFile);
     }
 
-    loadKeys       = new ArrayList<>(writeKeySeen.values());
     firstTimestamp = traceEntries.get(0).timestampSec;
 
     System.err.println("[TraceWorkload] Loaded " + traceEntries.size()
-        + " trace entries, " + loadKeys.size() + " unique write keys for load phase.");
+        + " trace entries, " + loadKeys.size() + " write entries for load phase.");
   }
 
   // ── Load phase ──────────────────────────────────────────────────────────────
   /**
    * Called repeatedly by worker threads during the load phase.
-   * Each call inserts the next unique write key as fast as possible.
+   * Each call inserts the next write entry from the trace as fast as possible.
+   * All write operations are replayed in trace order — no deduplication.
    */
   @Override
   public boolean doInsert(DB db, Object threadstate) {

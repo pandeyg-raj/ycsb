@@ -151,7 +151,6 @@ static volatile uint64_t g_total_gets  = 0;
 
 /* manual load progress */
 static volatile uint64_t g_next_key = 0;
-static volatile uint64_t g_popped   = 0;   /* total records popped from queue */
 
 /* timing */
 static uint64_t g_t_start = 0;
@@ -533,11 +532,9 @@ static void run_reader(void) {
     char     line[1024];
     uint64_t first_trace_ts = UINT64_MAX;
     uint64_t start_wall     = now_ns();
-    uint64_t submitted      = 0;
-    uint64_t submitted_sets = 0;
-    uint64_t submitted_gets = 0;
-    uint64_t skipped        = 0;
-    uint64_t lines_read     = 0;
+    uint64_t submitted  = 0;
+    uint64_t skipped    = 0;
+    uint64_t lines_read = 0;
 
     while (!g_stop && fgets(line, sizeof(line), fp)) {
 
@@ -577,18 +574,13 @@ static void run_reader(void) {
             sleep_ns(10000);
 
         submitted++;
-        if (rec.op == OP_SET) submitted_sets++;
-        else if (rec.op == OP_GET) submitted_gets++;
     }
 
     fclose(fp);
     g_queue.done = 1;
-    printf("\nTrace done: lines_read=%lu  submitted=%lu"
-           "  sets=%lu  gets=%lu  skipped=%lu\n",
+    printf("\nTrace done: lines_read=%lu  submitted=%lu  skipped=%lu\n",
            (unsigned long)lines_read,
            (unsigned long)submitted,
-           (unsigned long)submitted_sets,
-           (unsigned long)submitted_gets,
            (unsigned long)skipped);
 }
 
@@ -614,8 +606,6 @@ static void *worker_fn(void *arg) {
             }
             if (++spins > 100) sleep_ns(100000);
         }
-        __atomic_fetch_add(&g_popped, 1, __ATOMIC_RELAXED);
-
         uint64_t t0 = now_ns();
 
         if (rec.op == OP_GET) {
@@ -1154,20 +1144,6 @@ int main(int argc, char **argv) {
         for (int i = 0; i < cfg.num_threads; i++)
             pthread_join(workers[i].tid, NULL);
         g_stop = 1;   /* now stop reporter */
-
-        /* debug: show per-thread counts and total */
-        uint64_t dbg_sets = 0;
-        for (int i = 0; i < cfg.num_threads; i++) {
-            dbg_sets += g_stats[i].set.count;
-            printf("DEBUG thread %2d: sets=%lu\n",
-                   i, (unsigned long)g_stats[i].set.count);
-        }
-        printf("DEBUG total popped from queue: %lu\n",
-               (unsigned long)__atomic_load_n(&g_popped, __ATOMIC_RELAXED));
-        printf("DEBUG total sets executed: %lu  prescan: %lu  diff: %ld\n",
-               (unsigned long)dbg_sets,
-               (unsigned long)g_total_sets,
-               (long)g_total_sets - (long)dbg_sets);
     }
 
     pthread_join(rep_tid, NULL);

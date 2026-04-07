@@ -242,7 +242,8 @@ static inline bool queue_pop(RingQueue *q, TraceRecord *out) {
         return false;
     }
     *out = q->buf[tail & q->mask];
-    q->tail = tail + 1;
+    /* RELEASE store so the exit-condition's ACQUIRE load sees updated tail */
+    __atomic_store_n(&q->tail, tail + 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&q->pop_mu);
     return true;
 }
@@ -603,10 +604,13 @@ static void *worker_fn(void *arg) {
         int spins = 0;
         while (!queue_pop(&g_queue, &rec)) {
             if (g_queue.done) {
-                /* queue is done — verify it's actually empty before exiting */
-                uint64_t h = __atomic_load_n(&g_queue.head, __ATOMIC_ACQUIRE);
-                uint64_t t = __atomic_load_n(&g_queue.tail, __ATOMIC_ACQUIRE);
-                if (h == t) goto done;  /* truly empty, safe to exit */
+                /* Check under the mutex so we see the true tail value —
+                 * no stale reads that could cause premature exit */
+                pthread_mutex_lock(&g_queue.pop_mu);
+                bool empty = (g_queue.tail ==
+                    (uint64_t)__atomic_load_n(&g_queue.head, __ATOMIC_ACQUIRE));
+                pthread_mutex_unlock(&g_queue.pop_mu);
+                if (empty) goto done;
             }
             if (++spins > 100) sleep_ns(100000);
         }

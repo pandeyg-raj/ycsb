@@ -593,7 +593,12 @@ static void *worker_fn(void *arg) {
     while (!g_stop) {
         int spins = 0;
         while (!queue_pop(&g_queue, &rec)) {
-            if (g_queue.done && spins > 1000) goto done;
+            if (g_queue.done) {
+                /* queue is done — verify it's actually empty before exiting */
+                uint64_t h = __atomic_load_n(&g_queue.head, __ATOMIC_ACQUIRE);
+                uint64_t t = __atomic_load_n(&g_queue.tail, __ATOMIC_ACQUIRE);
+                if (h == t) goto done;  /* truly empty, safe to exit */
+            }
             if (++spins > 100) sleep_ns(100000);
         }
         __atomic_fetch_add(&g_popped, 1, __ATOMIC_RELAXED);

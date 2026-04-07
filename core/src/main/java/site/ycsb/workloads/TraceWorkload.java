@@ -81,7 +81,7 @@ public class TraceWorkload extends Workload {
 
   // ── Shared state (set once in init, read-only after that) ──────────────────
   private List<TraceEntry>                 traceEntries;
-  /** Unique keys that have at least one write in the trace — used for load. */
+  /** All write entries from the trace — used for load phase. */
   private List<TraceEntry>                 loadKeys;
   private double                           firstTimestamp;
   private int                              fixedFieldLength;
@@ -89,14 +89,21 @@ public class TraceWorkload extends Workload {
   private boolean                          loadUsesTraceSize;
 
   /** Shared atomic index for the run phase across all threads. */
-  private static final AtomicInteger       runIndex  = new AtomicInteger(0);
+  private static final AtomicInteger       runIndex       = new AtomicInteger(0);
   /** Shared atomic index for the load phase across all threads. */
-  private static final AtomicInteger       loadIndex = new AtomicInteger(0);
+  private static final AtomicInteger       loadIndex      = new AtomicInteger(0);
+
+  /** Tracks the last progress percentage milestone printed (multiples of PROGRESS_INTERVAL_PCT). */
+  private static final AtomicInteger       lastPctPrinted = new AtomicInteger(0);
+  /** Print a progress line every N percent. */
+  private static final int                 PROGRESS_INTERVAL_PCT = 5;
 
   /** Wall-clock nanotime when the first doTransaction() call fires. */
-  private volatile long                    runStartNs = 0;
-  private final Object                     startLock  = new Object();
-  private volatile boolean                 started    = false;
+  private volatile long                    runStartNs  = 0;
+  private volatile long                    loadStartNs = 0;
+  private final Object                     startLock   = new Object();
+  private volatile boolean                 started     = false;
+  private volatile boolean                 loadStarted = false;
 
   // ── init ────────────────────────────────────────────────────────────────────
   @Override
@@ -176,6 +183,20 @@ public class TraceWorkload extends Workload {
     if (idx >= loadKeys.size()) {
       return false; // nothing left to load
     }
+
+    // ── Load phase progress ───────────────────────────────────────────────
+    if (!loadStarted) {
+      synchronized (startLock) {
+        if (!loadStarted) {
+          loadStartNs = System.nanoTime();
+          loadStarted = true;
+          System.err.println("[TraceWorkload] Load phase started. Inserting "
+              + loadKeys.size() + " write entries.");
+        }
+      }
+    }
+    printProgress("LOAD", idx + 1, loadKeys.size());
+
     TraceEntry entry = loadKeys.get(idx);
     int valueLen = loadUsesTraceSize ? Math.max(entry.valueSize, 1) : fixedFieldLength;
 
@@ -204,15 +225,21 @@ public class TraceWorkload extends Workload {
         if (!started) {
           runStartNs = System.nanoTime();
           started    = true;
+          lastPctPrinted.set(0);  // reset so run phase progress starts fresh from 0%
+          System.err.println("[TraceWorkload] Run phase started. Replaying "
+              + traceEntries.size() + " trace entries.");
         }
       }
     }
 
+    // ── Run phase progress ────────────────────────────────────────────────
+    printProgress("RUN", idx + 1, traceEntries.size());
+
     // ── Sleep until this entry's arrival time ─────────────────────────────
-    double offsetSec    = entry.timestampSec - firstTimestamp;
-    long   targetNs     = runStartNs + (long)(offsetSec * 1_000_000_000L);
-    long   nowNs        = System.nanoTime();
-    long   sleepNs      = targetNs - nowNs;
+    double offsetSec = entry.timestampSec - firstTimestamp;
+    long   targetNs  = runStartNs + (long)(offsetSec * 1_000_000_000L);
+    long   nowNs     = System.nanoTime();
+    long   sleepNs   = targetNs - nowNs;
     if (sleepNs > 0) {
       LockSupport.parkNanos(sleepNs);
     }
@@ -256,11 +283,32 @@ public class TraceWorkload extends Workload {
     }
   }
 
-  // ── Value construction ───────────────────────────────────────────────────
+  // ── Progress reporting ───────────────────────────────────────────────────
   /**
-   * Builds a single-field value map sized to valueLen bytes.
-   * Prepends 0x00 byte to match the LEAST write path requirement in this fork.
+   * Prints a progress line to stderr every PROGRESS_INTERVAL_PCT percent.
+   * Thread-safe via AtomicInteger — only one thread prints each milestone.
    */
+  private void printProgress(String phase, int done, int total) {
+    int pct = (int)((100L * done) / total);
+    int milestone = (pct / PROGRESS_INTERVAL_PCT) * PROGRESS_INTERVAL_PCT;
+    if (milestone > 0 && lastPctPrinted.get() < milestone) {
+      if (lastPctPrinted.compareAndSet(milestone - PROGRESS_INTERVAL_PCT, milestone)) {
+        long startNs   = "RUN".equals(phase) ? runStartNs : loadStartNs;
+        long elapsedSec = startNs > 0 ? (System.nanoTime() - startNs) / 1_000_000_000L : 0;
+        System.err.printf("[TraceWorkload] [%s] %3d%%  %,d / %,d ops   elapsed: %ds%n",
+            phase, milestone, done, total, elapsedSec);
+      }
+    }
+    if (done == total && lastPctPrinted.compareAndSet(
+        (100 / PROGRESS_INTERVAL_PCT) * PROGRESS_INTERVAL_PCT - PROGRESS_INTERVAL_PCT, 100)) {
+      long startNs    = "RUN".equals(phase) ? runStartNs : loadStartNs;
+      long elapsedSec = startNs > 0 ? (System.nanoTime() - startNs) / 1_000_000_000L : 0;
+      System.err.printf("[TraceWorkload] [%s] 100%%  %,d / %,d ops  COMPLETE  elapsed: %ds%n",
+          phase, done, total, elapsedSec);
+    }
+  }
+
+  // ── Value construction ───────────────────────────────────────────────────
   private HashMap<String, ByteIterator> buildValue(int valueLen) {
     // Ensure at least 1 byte after prefix
     int totalLen = Math.max(valueLen, 1);

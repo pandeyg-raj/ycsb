@@ -72,7 +72,7 @@ typedef struct {
 typedef struct { Tracker get; Tracker set; } ThreadStats;
 typedef struct { int id; pthread_t tid; } Worker;
 
-/* ── Ring queue (SPSC: one producer reader thread, N consumer workers) ────────── */
+/* ── Ring queue (SPMC: one producer reader thread, N consumer workers) ────────── */
 
 typedef struct {
     TraceRecord     *buf;
@@ -213,10 +213,12 @@ static void queue_init(RingQueue *q, uint64_t cap) {
 }
 
 static inline bool queue_push(RingQueue *q, const TraceRecord *r) {
-    uint64_t next = (q->head + 1) & q->mask;
-    if (next == __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE)) return false;
-    q->buf[q->head & q->mask] = *r;
-    __atomic_store_n(&q->head, q->head + 1, __ATOMIC_RELEASE);
+    uint64_t head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);
+    uint64_t tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
+    /* full check: use absolute difference, not masked comparison */
+    if (head - tail >= (uint64_t)(q->mask + 1)) return false;
+    q->buf[head & q->mask] = *r;
+    __atomic_store_n(&q->head, head + 1, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -225,13 +227,13 @@ static inline bool queue_pop(RingQueue *q, TraceRecord *out) {
     do {
         tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
         head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
-        if (tail == head) return false;   /* queue empty */
-        /* CAS: only one thread wins the right to consume slot 'tail' */
+        /* empty check: absolute counters, no masking needed */
+        if (tail == head) return false;
     } while (!__atomic_compare_exchange_n(&q->tail, &tail, tail + 1,
                                           /*weak=*/true,
                                           __ATOMIC_ACQ_REL,
                                           __ATOMIC_ACQUIRE));
-    /* we exclusively own slot tail — safe to read */
+    /* CAS won — we exclusively own slot tail */
     *out = q->buf[tail & q->mask];
     return true;
 }

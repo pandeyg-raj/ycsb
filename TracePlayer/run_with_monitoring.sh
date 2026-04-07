@@ -33,7 +33,7 @@ NODES=(
 
 CASS_HOST="10.10.1.2"          # coordinator node
 TRACE_FILE="cluster46.filtered"
-CONSISTENCY="ALL"
+CONSISTENCY="QUORUM"
 THREADS=64
 DURATION=3600
 REMOTE_DIR="/mydata"

@@ -18,6 +18,7 @@ Valid metrics: cpu_pct, disk_read_mb_s, disk_write_mb_s,
 
 import argparse
 import glob
+import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
@@ -126,10 +127,9 @@ for ax, metric in zip(axes, args.metrics):
     ax.plot(exp2['elapsed'], exp2[metric],
             label=args.exp2_label, color=EXP2_COLOR, lw=1.5)
 
-    # Shaded area between the two lines to highlight difference
-    ax.fill_between(exp1['elapsed'],
-                    exp1[metric].reindex(exp1.index, fill_value=0),
-                    exp2[metric].reindex(exp2.index, fill_value=0),
+    # Interpolate exp2 onto exp1's time axis so fill_between gets equal-length arrays
+    exp2_interp = np.interp(exp1['elapsed'], exp2['elapsed'], exp2[metric])
+    ax.fill_between(exp1['elapsed'], exp1[metric], exp2_interp,
                     alpha=0.08, color='gray')
 
     if metric == 'cpu_pct':

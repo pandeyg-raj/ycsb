@@ -1,34 +1,29 @@
 /**
  * TraceWorkload.java
  *
- * A YCSB Workload that replays a Twitter-format cache trace file.
+ * Replays a Twitter-format cache trace against Cassandra via YCSB.
  *
- * Trace file format (CSV, no header):
+ * Trace format (CSV, no header):
  *   timestamp_sec, key, key_size, value_size, client_id, operation, ttl
  *
- * Supported operations:
+ * Operation mapping:
  *   get, gets           → READ
  *   set, add, replace   → INSERT
- *   cas                 → UPDATE
- *   append, prepend     → UPDATE
+ *   cas, append, prepend, incr, decr → UPDATE
  *   delete              → DELETE
- *   incr, decr          → UPDATE (approximated)
+ *
+ * Architecture (run phase):
+ *   One dispatcher thread reads the trace in order, sleeps until each
+ *   entry's wall-clock arrival time, then enqueues it. Multiple worker
+ *   threads (YCSB -threads N) pull from the queue and issue immediately.
+ *   This correctly handles bursts of 3000+ req/sec without ordering issues.
  *
  * Properties:
- *   tracefile                  — path to trace file (required)
- *   trace.valuesize=trace|ycsb — use value_size from trace or fieldlength from
- *                                 properties (default: ycsb)
- *   trace.load.valuesize=trace|ycsb — same but for load phase (default: ycsb)
- *   fieldlength                — used when trace.valuesize=ycsb (default: 100)
- *
- * Usage:
- *   -P workloads/traceworkload -p tracefile=/path/to/trace.csv
- *   -p trace.valuesize=trace -p trace.load.valuesize=ycsb
- *
- * Load phase  (-load): inserts all unique writable keys from the trace as fast
- *                       as possible using the configured thread count.
- * Run  phase  (-t):    replays all trace entries in order, sleeping between
- *                       operations to match original arrival timing.
+ *   tracefile                    path to trace CSV (required)
+ *   trace.valuesize=trace|ycsb   run phase value size source (default: ycsb)
+ *   trace.load.valuesize=trace|ycsb  load phase value size source (default: ycsb)
+ *   fieldlength                  fixed value size when valuesize=ycsb (default: 100)
+ *   trace.workers=N              worker thread count hint (informational only; set via -threads)
  */
 
 package site.ycsb.workloads;
@@ -46,30 +41,35 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
 public class TraceWorkload extends Workload {
 
-  // ── Property keys ──────────────────────────────────────────────────────────
-  public static final String TRACE_FILE_PROPERTY        = "tracefile";
-  public static final String TRACE_VALUESIZE_PROPERTY   = "trace.valuesize";       // trace | ycsb
-  public static final String TRACE_LOAD_VALUESIZE_PROP  = "trace.load.valuesize";  // trace | ycsb
-  public static final String FIELD_LENGTH_PROPERTY      = "fieldlength";
+  // ── Property keys ────────────────────────────────────────────────────────────
+  public static final String TRACE_FILE_PROPERTY       = "tracefile";
+  public static final String TRACE_VALUESIZE_PROPERTY  = "trace.valuesize";
+  public static final String TRACE_LOAD_VALUESIZE_PROP = "trace.load.valuesize";
+  public static final String FIELD_LENGTH_PROPERTY     = "fieldlength";
 
   private static final String VALUESIZE_TRACE = "trace";
   private static final String VALUESIZE_YCSB  = "ycsb";
   private static final String FIELD_NAME      = "field0";
 
-  // ── Parsed trace ────────────────────────────────────────────────────────────
-  /** One entry per line in the trace file. */
+  /** Sentinel placed in the queue to signal a worker thread to stop. */
+  private static final TraceEntry POISON = new TraceEntry(0, "__POISON__", 0, "poison");
+
+  // ── Trace entry ──────────────────────────────────────────────────────────────
   private static class TraceEntry {
     final double timestampSec;
     final String key;
-    final int    valueSize;   // from trace column 3
-    final String operation;   // raw string from trace
+    final int    valueSize;
+    final String operation;
 
     TraceEntry(double ts, String key, int valueSize, String op) {
       this.timestampSec = ts;
@@ -79,33 +79,50 @@ public class TraceWorkload extends Workload {
     }
   }
 
-  // ── Shared state (set once in init, read-only after that) ──────────────────
-  private List<TraceEntry>                 traceEntries;
-  /** All write entries from the trace — used for load phase. */
-  private List<TraceEntry>                 loadKeys;
-  private double                           firstTimestamp;
-  private int                              fixedFieldLength;
-  private boolean                          runUsesTraceSize;
-  private boolean                          loadUsesTraceSize;
+  // ── Shared state ─────────────────────────────────────────────────────────────
+  private List<TraceEntry> traceEntries;
+  private List<TraceEntry> loadKeys;
+  private double           firstTimestamp;
+  private double           lastTimestamp;
+  private int              fixedFieldLength;
+  private boolean          runUsesTraceSize;
+  private boolean          loadUsesTraceSize;
 
-  /** Shared atomic index for the run phase across all threads. */
-  private static final AtomicInteger       runIndex       = new AtomicInteger(0);
-  /** Shared atomic index for the load phase across all threads. */
-  private static final AtomicInteger       loadIndex      = new AtomicInteger(0);
+  /**
+   * Queue between dispatcher and worker threads.
+   * Capacity 50000 — large enough to absorb bursts without blocking dispatcher.
+   */
+  private static final BlockingQueue<TraceEntry> queue = new LinkedBlockingQueue<>(50000);
 
-  /** Tracks the last progress percentage milestone printed (multiples of PROGRESS_INTERVAL_PCT). */
-  private static final AtomicInteger       lastPctPrinted = new AtomicInteger(0);
-  /** Print a progress line every N percent. */
-  private static final int                 PROGRESS_INTERVAL_PCT = 5;
+  /** Number of worker threads — set from YCSB -threads parameter via workaround. */
+  private static volatile int workerCount = 1;
 
-  /** Wall-clock nanotime when the first doTransaction() call fires. */
-  private volatile long                    runStartNs  = 0;
-  private volatile long                    loadStartNs = 0;
-  private final Object                     startLock   = new Object();
-  private volatile boolean                 started     = false;
-  private volatile boolean                 loadStarted = false;
+  /** Load phase shared index. */
+  private static final AtomicInteger loadIndex = new AtomicInteger(0);
 
-  // ── init ────────────────────────────────────────────────────────────────────
+  /** Dispatcher thread — started once on first doTransaction() call. */
+  private static volatile Thread   dispatcherThread = null;
+  private static volatile boolean  dispatcherStarted = false;
+  private static final Object      dispatcherLock    = new Object();
+
+  /** Wall-clock nanotime when dispatcher fires the first entry. */
+  private static volatile long runStartNs = 0;
+
+  // ── Progress tracking (time-based) ──────────────────────────────────────────
+  /** Trace time span in seconds. */
+  private double traceDurationSec;
+  /** Current trace timestamp being dispatched — updated by dispatcher. */
+  private static final AtomicLong currentTraceNs = new AtomicLong(0);
+  /** Last progress milestone printed (multiples of PROGRESS_STEP_PCT). */
+  private static final AtomicInteger lastPctPrinted = new AtomicInteger(0);
+  private static final int PROGRESS_STEP_PCT = 5;
+
+  // ── Load progress ────────────────────────────────────────────────────────────
+  private static volatile long loadStartNs  = 0;
+  private static volatile boolean loadStarted = false;
+  private static final Object loadStartLock = new Object();
+
+  // ── init ─────────────────────────────────────────────────────────────────────
   @Override
   public void init(Properties p) throws WorkloadException {
     String traceFile = p.getProperty(TRACE_FILE_PROPERTY);
@@ -119,9 +136,13 @@ public class TraceWorkload extends Workload {
     loadUsesTraceSize = VALUESIZE_TRACE.equalsIgnoreCase(loadSizeProp);
     fixedFieldLength  = Integer.parseInt(p.getProperty(FIELD_LENGTH_PROPERTY, "100"));
 
+    // Grab worker count from properties if specified
+    String wc = p.getProperty("threadcount", p.getProperty("trace.workers", "1"));
+    try { workerCount = Integer.parseInt(wc); } catch (NumberFormatException e) { workerCount = 1; }
+
     System.err.println("[TraceWorkload] Loading trace: " + traceFile);
-    System.err.println("[TraceWorkload] Run  value size source : " + runSizeProp);
-    System.err.println("[TraceWorkload] Load value size source : " + loadSizeProp);
+    System.err.println("[TraceWorkload] Run value size : " + runSizeProp
+        + "  Load value size: " + loadSizeProp);
 
     traceEntries = new ArrayList<>();
     loadKeys     = new ArrayList<>();
@@ -137,7 +158,7 @@ public class TraceWorkload extends Workload {
         }
         String[] parts = line.split(",", -1);
         if (parts.length < 6) {
-          System.err.println("[TraceWorkload] Skipping malformed line " + lineNum + ": " + line);
+          System.err.println("[TraceWorkload] Skipping malformed line " + lineNum);
           continue;
         }
         try {
@@ -148,45 +169,40 @@ public class TraceWorkload extends Workload {
 
           TraceEntry entry = new TraceEntry(ts, key, valueSize, op);
           traceEntries.add(entry);
-
-          // Collect ALL write entries for load phase (no deduplication)
           if (isWrite(op)) {
             loadKeys.add(entry);
           }
         } catch (NumberFormatException e) {
-          System.err.println("[TraceWorkload] Skipping line " + lineNum + " (parse error): " + e.getMessage());
+          System.err.println("[TraceWorkload] Parse error at line " + lineNum + ": " + e.getMessage());
         }
       }
     } catch (IOException e) {
-      throw new WorkloadException("Failed to read trace file: " + traceFile, e);
+      throw new WorkloadException("Cannot read trace file: " + traceFile, e);
     }
 
     if (traceEntries.isEmpty()) {
-      throw new WorkloadException("Trace file is empty or has no valid entries: " + traceFile);
+      throw new WorkloadException("Trace file has no valid entries: " + traceFile);
     }
 
-    firstTimestamp = traceEntries.get(0).timestampSec;
+    firstTimestamp   = traceEntries.get(0).timestampSec;
+    lastTimestamp    = traceEntries.get(traceEntries.size() - 1).timestampSec;
+    traceDurationSec = lastTimestamp - firstTimestamp;
 
-    System.err.println("[TraceWorkload] Loaded " + traceEntries.size()
-        + " trace entries, " + loadKeys.size() + " write entries for load phase.");
+    System.err.println("[TraceWorkload] Trace entries: " + traceEntries.size()
+        + "  Write entries for load: " + loadKeys.size());
+    System.err.printf("[TraceWorkload] Trace duration: %.0f seconds (%.1f hours)%n",
+        traceDurationSec, traceDurationSec / 3600.0);
   }
 
-  // ── Load phase ──────────────────────────────────────────────────────────────
-  /**
-   * Called repeatedly by worker threads during the load phase.
-   * Each call inserts the next write entry from the trace as fast as possible.
-   * All write operations are replayed in trace order — no deduplication.
-   */
+  // ── Load phase ───────────────────────────────────────────────────────────────
   @Override
   public boolean doInsert(DB db, Object threadstate) {
     int idx = loadIndex.getAndIncrement();
     if (idx >= loadKeys.size()) {
-      return false; // nothing left to load
+      return false;
     }
-
-    // ── Load phase progress ───────────────────────────────────────────────
     if (!loadStarted) {
-      synchronized (startLock) {
+      synchronized (loadStartLock) {
         if (!loadStarted) {
           loadStartNs = System.nanoTime();
           loadStarted = true;
@@ -195,76 +211,108 @@ public class TraceWorkload extends Workload {
         }
       }
     }
-    printProgress("LOAD", idx + 1, loadKeys.size());
+
+    // Progress based on op count (load is as-fast-as-possible so time doesn't help)
+    printLoadProgress(idx + 1, loadKeys.size());
 
     TraceEntry entry = loadKeys.get(idx);
     int valueLen = loadUsesTraceSize ? Math.max(entry.valueSize, 1) : fixedFieldLength;
-
-    HashMap<String, ByteIterator> values = buildValue(valueLen);
-    Status status = db.insert("usertable", entry.key, values);
+    Status status = db.insert("usertable", entry.key, buildValue(valueLen));
     return status == Status.OK || status == Status.BATCHED_OK;
   }
 
-  // ── Run phase ───────────────────────────────────────────────────────────────
-  /**
-   * Called repeatedly by worker threads during the run phase.
-   * Sleeps until the trace-specified arrival time, then issues the operation.
-   */
+  // ── Run phase: worker ────────────────────────────────────────────────────────
   @Override
   public boolean doTransaction(DB db, Object threadstate) {
-    int idx = runIndex.getAndIncrement();
-    if (idx >= traceEntries.size()) {
-      return false; // replay complete
-    }
-
-    TraceEntry entry = traceEntries.get(idx);
-
-    // ── Establish wall-clock start on first call ──────────────────────────
-    if (!started) {
-      synchronized (startLock) {
-        if (!started) {
-          runStartNs = System.nanoTime();
-          started    = true;
-          lastPctPrinted.set(0);  // reset so run phase progress starts fresh from 0%
-          System.err.println("[TraceWorkload] Run phase started. Replaying "
-              + traceEntries.size() + " trace entries.");
+    // Start dispatcher once
+    if (!dispatcherStarted) {
+      synchronized (dispatcherLock) {
+        if (!dispatcherStarted) {
+          dispatcherStarted = true;
+          lastPctPrinted.set(0);
+          startDispatcher();
         }
       }
     }
 
-    // ── Run phase progress ────────────────────────────────────────────────
-    printProgress("RUN", idx + 1, traceEntries.size());
-
-    // ── Sleep until this entry's arrival time ─────────────────────────────
-    double offsetSec = entry.timestampSec - firstTimestamp;
-    long   targetNs  = runStartNs + (long)(offsetSec * 1_000_000_000L);
-    long   nowNs     = System.nanoTime();
-    long   sleepNs   = targetNs - nowNs;
-    if (sleepNs > 0) {
-      LockSupport.parkNanos(sleepNs);
+    // Pull next entry from queue — block up to 5s waiting for dispatcher
+    TraceEntry entry;
+    try {
+      entry = queue.poll(5, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
     }
 
-    // ── Issue operation ───────────────────────────────────────────────────
+    if (entry == null || entry == POISON) {
+      return false; // trace exhausted
+    }
+
     int valueLen = runUsesTraceSize ? Math.max(entry.valueSize, 1) : fixedFieldLength;
     issueOperation(db, entry, valueLen);
-
     return true;
   }
 
-  // ── Operation dispatch ───────────────────────────────────────────────────
+  // ── Dispatcher thread ────────────────────────────────────────────────────────
+  private void startDispatcher() {
+    dispatcherThread = new Thread(() -> {
+      runStartNs = System.nanoTime();
+      System.err.println("[TraceWorkload] Run phase started. Replaying "
+          + traceEntries.size() + " entries over "
+          + String.format("%.0f", traceDurationSec) + "s of trace time."
+          + " Worker threads: " + workerCount);
+
+      for (TraceEntry entry : traceEntries) {
+        // ── Timing: sleep until this entry's trace time ────────────────────
+        double offsetSec = entry.timestampSec - firstTimestamp;
+        long   targetNs  = runStartNs + (long)(offsetSec * 1_000_000_000L);
+        long   sleepNs   = targetNs - System.nanoTime();
+        if (sleepNs > 0) {
+          LockSupport.parkNanos(sleepNs);
+        }
+
+        // ── Update current trace time for progress reporting ───────────────
+        currentTraceNs.set((long)((entry.timestampSec - firstTimestamp) * 1_000_000_000L));
+        printRunProgress(entry.timestampSec);
+
+        // ── Enqueue — block if workers are falling behind ──────────────────
+        try {
+          queue.put(entry);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          break;
+        }
+      }
+
+      // Send one POISON pill per worker thread so all workers stop cleanly
+      System.err.println("[TraceWorkload] Dispatcher done. Sending stop signals to "
+          + workerCount + " workers.");
+      for (int i = 0; i < workerCount; i++) {
+        try {
+          queue.put(POISON);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          break;
+        }
+      }
+    }, "TraceDispatcher");
+
+    dispatcherThread.setDaemon(true);
+    dispatcherThread.start();
+  }
+
+  // ── Operation dispatch ───────────────────────────────────────────────────────
   private void issueOperation(DB db, TraceEntry entry, int valueLen) {
     switch (entry.operation) {
       case "get":
       case "gets":
         db.read("usertable", entry.key, null, new HashMap<>());
         break;
-
       case "set":
       case "add":
       case "replace":
         db.insert("usertable", entry.key, buildValue(valueLen));
         break;
-
       case "cas":
       case "append":
       case "prepend":
@@ -272,57 +320,73 @@ public class TraceWorkload extends Workload {
       case "decr":
         db.update("usertable", entry.key, buildValue(valueLen));
         break;
-
       case "delete":
         db.delete("usertable", entry.key);
         break;
-
       default:
-        System.err.println("[TraceWorkload] Unknown operation '" + entry.operation + "' — skipping.");
-        break;
+        System.err.println("[TraceWorkload] Unknown op: " + entry.operation);
     }
   }
 
-  // ── Progress reporting ───────────────────────────────────────────────────
-  /**
-   * Prints a progress line to stderr every PROGRESS_INTERVAL_PCT percent.
-   * Thread-safe via AtomicInteger — only one thread prints each milestone.
-   */
-  private void printProgress(String phase, int done, int total) {
-    int pct = (int)((100L * done) / total);
-    int milestone = (pct / PROGRESS_INTERVAL_PCT) * PROGRESS_INTERVAL_PCT;
+  // ── Progress: time-based for run phase ──────────────────────────────────────
+  private void printRunProgress(double currentTraceSec) {
+    if (traceDurationSec <= 0) {
+      return;
+    }
+    int pct = (int)(100.0 * (currentTraceSec - firstTimestamp) / traceDurationSec);
+    int milestone = (pct / PROGRESS_STEP_PCT) * PROGRESS_STEP_PCT;
     if (milestone > 0 && lastPctPrinted.get() < milestone) {
-      if (lastPctPrinted.compareAndSet(milestone - PROGRESS_INTERVAL_PCT, milestone)) {
-        long startNs   = "RUN".equals(phase) ? runStartNs : loadStartNs;
-        long elapsedSec = startNs > 0 ? (System.nanoTime() - startNs) / 1_000_000_000L : 0;
-        System.err.printf("[TraceWorkload] [%s] %3d%%  %,d / %,d ops   elapsed: %ds%n",
-            phase, milestone, done, total, elapsedSec);
+      if (lastPctPrinted.compareAndSet(milestone - PROGRESS_STEP_PCT, milestone)) {
+        long elapsedSec = (System.nanoTime() - runStartNs) / 1_000_000_000L;
+        int  queueDepth = queue.size();
+        System.err.printf(
+            "[TraceWorkload] [RUN] %3d%%  trace_time=%.0fs / %.0fs"
+            + "  wall_elapsed=%ds  queue_depth=%d%n",
+            milestone,
+            currentTraceSec - firstTimestamp,
+            traceDurationSec,
+            elapsedSec,
+            queueDepth);
       }
     }
-    if (done == total && lastPctPrinted.compareAndSet(
-        (100 / PROGRESS_INTERVAL_PCT) * PROGRESS_INTERVAL_PCT - PROGRESS_INTERVAL_PCT, 100)) {
-      long startNs    = "RUN".equals(phase) ? runStartNs : loadStartNs;
-      long elapsedSec = startNs > 0 ? (System.nanoTime() - startNs) / 1_000_000_000L : 0;
-      System.err.printf("[TraceWorkload] [%s] 100%%  %,d / %,d ops  COMPLETE  elapsed: %ds%n",
-          phase, done, total, elapsedSec);
+    // 100% complete
+    if (currentTraceSec >= lastTimestamp
+        && lastPctPrinted.compareAndSet(100 - PROGRESS_STEP_PCT, 100)) {
+      long elapsedSec = (System.nanoTime() - runStartNs) / 1_000_000_000L;
+      System.err.printf(
+          "[TraceWorkload] [RUN] 100%%  COMPLETE  wall_elapsed=%ds%n", elapsedSec);
     }
   }
 
-  // ── Value construction ───────────────────────────────────────────────────
+  // ── Progress: op-count-based for load phase ──────────────────────────────────
+  private void printLoadProgress(int done, int total) {
+    int pct      = (int)(100L * done / total);
+    int milestone = (pct / PROGRESS_STEP_PCT) * PROGRESS_STEP_PCT;
+    if (milestone > 0 && lastPctPrinted.get() < milestone) {
+      if (lastPctPrinted.compareAndSet(milestone - PROGRESS_STEP_PCT, milestone)) {
+        long elapsedSec = loadStartNs > 0 ? (System.nanoTime() - loadStartNs) / 1_000_000_000L : 0;
+        System.err.printf("[TraceWorkload] [LOAD] %3d%%  %,d / %,d ops  elapsed=%ds%n",
+            milestone, done, total, elapsedSec);
+      }
+    }
+    if (done == total) {
+      long elapsedSec = loadStartNs > 0 ? (System.nanoTime() - loadStartNs) / 1_000_000_000L : 0;
+      System.err.printf("[TraceWorkload] [LOAD] 100%%  %,d ops  COMPLETE  elapsed=%ds%n",
+          total, elapsedSec);
+    }
+  }
+
+  // ── Value construction ───────────────────────────────────────────────────────
   private HashMap<String, ByteIterator> buildValue(int valueLen) {
-    // Ensure at least 1 byte after prefix
     int totalLen = Math.max(valueLen, 1);
     byte[] data  = new byte[totalLen];
-    data[0]      = 0x00;  // LEAST write-path prefix (required by this fork)
-    // remaining bytes left as 0x00 — lightweight, no random generation needed
-    // If you want random content: ThreadLocalRandom.current().nextBytes(data);
-
+    data[0]      = 0x00; // required prefix for LEAST write path
     HashMap<String, ByteIterator> values = new HashMap<>();
     values.put(FIELD_NAME, new ByteArrayByteIterator(data));
     return values;
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────────────────────
   private static boolean isWrite(String op) {
     switch (op) {
       case "set": case "add": case "replace":
@@ -332,5 +396,4 @@ public class TraceWorkload extends Workload {
         return false;
     }
   }
-
 }

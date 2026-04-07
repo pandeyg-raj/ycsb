@@ -287,9 +287,4 @@ public class TraceWorkload extends Workload {
     }
   }
 
-  /** Required by Workload — return total number of run-phase entries. */
-  @Override
-  public int getOperationCount() {
-    return traceEntries == null ? 0 : traceEntries.size();
-  }
 }

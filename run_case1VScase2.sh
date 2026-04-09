@@ -20,7 +20,7 @@ read THREADS
 OUT_DIR=case1Vscase2
 mkdir -p "$OUT_DIR"
 
-breakdownresult="Case1vsCase2_${EXP_LABEL}_summary.txt"
+breakdownresult="${OUT_DIR}/Case1vsCase2_${EXP_LABEL}_summary.txt"
 touch "$breakdownresult"
 
 RAW_FILE="${OUT_DIR}/${EXP_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"

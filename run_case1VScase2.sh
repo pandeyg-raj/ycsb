@@ -5,7 +5,7 @@ set -euo pipefail
 YCSB_DIR="bin/ycsb.sh"
 DB="cassandra-cql"
 
-MEMTABLE_MB=64                        # Match this to memtable_heap_space_in_mb in cassandra.yaml
+MEMTABLE_MB=128                        # Match this to memtable_heap_space_in_mb in cassandra.yaml
 MEMTABLE_BYTES=$((MEMTABLE_MB * 1024 * 1024))
 TARGET_FLUSHES=1000                   # Number of memtable flushes to trigger per run
 

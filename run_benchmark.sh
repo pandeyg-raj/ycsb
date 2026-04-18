@@ -68,7 +68,8 @@ for i in "${!WORKLOAD_LABELS[@]}"; do
         $YCSB_DIR run $DB -threads $THREADS \
             -P commonworkload \
             -p trace.valuesize=trace \
-            -p cassandra.writeconsistencylevel=QUORUM \
+            -p operationcount=99999999 \
+	    -p cassandra.writeconsistencylevel=QUORUM \
             -p cassandra.readconsistencylevel=QUORUM \
             -p measurement.raw.output_file="$RAW_FILE" \
             -s >> "${OUT_DIR}/${EXP_LABEL}_run_${workload}.log" 2>&1

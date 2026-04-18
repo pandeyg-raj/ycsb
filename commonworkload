@@ -1,4 +1,10 @@
 #dataintegrity=true
+
+
+#tracefile=/mydata/ycsb/TracePlayer/cluster46.filtered
+
+
+
 keylength=24
 cassandra.isEC=true
 cassandra.readconsistencylevel=ALL
@@ -7,17 +13,19 @@ hosts=10.10.1.2
 operationcount=10
 #poisson_lambda=100.0
 #measurement.raw.output_file = /mydata/ycsb/OScacheRepRead10KB_64GB_zip.data
-requestdistribution=zipfian
+#requestdistribution=zipfian
 # The offset of the first insertion
 insertstart=0
 fieldcount=1
 readallfields=false
 writeallfields=false
 
+
 workload=site.ycsb.workloads.CoreWorkload
+#workload=site.ycsb.workloads.TraceWorkload
 
 # The distribution of requests across the keyspace
-#requestdistribution=uniform
+requestdistribution=uniform
 #requestdistribution=latest
 # The name of the database table to run queries against
 table=usertable

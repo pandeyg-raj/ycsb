@@ -6,9 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -16,12 +14,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  * printable ASCII). Used by CoreWorkload (or any other workload) to source
  * values from a pre-prepared dataset instead of generating random bytes.
  *
- * Loaded once per JVM (singleton, identified by file path). Cursor is an
- * AtomicInteger so the hot path is lock-free. When the cursor wraps past
- * the end of the pool, it cycles back to the beginning.
+ * Values are returned in the file's natural line order: the same pool file
+ * produces the same value sequence on every run, so experiments are
+ * bit-for-bit reproducible.
+ *
+ * Loaded once per JVM (singleton, identified by file path). The cursor is
+ * an AtomicInteger so the hot path is lock-free. When the cursor wraps
+ * past the end of the pool, it cycles back to the beginning.
  *
  * Usage from a workload:
- *   ValuePool pool = ValuePool.getInstance(path, shuffle, seed);
+ *   ValuePool pool = ValuePool.getInstance(path);
  *   byte[] v = pool.nextValue();
  *   ByteIterator iter = new PoolByteIterator(v);
  */
@@ -34,35 +36,30 @@ public final class ValuePool {
   private final AtomicInteger cursor = new AtomicInteger(0);
   private final String sourcePath;
 
-  private ValuePool(String path, boolean shuffle, long seed) throws IOException {
+  private ValuePool(String path) throws IOException {
     this.sourcePath = path;
     this.values = loadFile(path);
     if (values.isEmpty()) {
       throw new IOException("Value pool is empty: " + path);
     }
-    if (shuffle) {
-      Collections.shuffle(values, new Random(seed));
-    }
     System.err.printf(
-        "[ValuePool] Loaded %,d values (%.2f GB) from %s%s%n",
+        "[ValuePool] Loaded %,d values (%.2f GB) from %s%n",
         values.size(),
         totalBytes() / 1e9,
-        path,
-        shuffle ? " (shuffled, seed=" + seed + ")" : "");
+        path);
   }
 
   /**
    * Get the singleton pool, initializing on first call. Subsequent calls
-   * return the existing instance regardless of arguments.
+   * return the existing instance regardless of the path argument.
    */
-  public static ValuePool getInstance(String path, boolean shuffle, long seed)
-      throws IOException {
+  public static ValuePool getInstance(String path) throws IOException {
     ValuePool local = instance;
     if (local == null) {
       synchronized (INIT_LOCK) {
         local = instance;
         if (local == null) {
-          local = new ValuePool(path, shuffle, seed);
+          local = new ValuePool(path);
           instance = local;
         }
       }

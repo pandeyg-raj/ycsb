@@ -66,6 +66,11 @@ import java.util.*;
  * </ul>
  */
 public class CoreWorkload extends Workload {
+
+  public static final String VALUE_POOL_PROPERTY = "valuepool.file";
+  /** When non-null, INSERTs/UPDATEs draw values from this pool instead of
+ *  generating random bytes. Set via the `valuepool.file` property. */
+  protected ValuePool valuePool = null;
   /**
    * The name of the database table to run queries against.
    */
@@ -453,6 +458,15 @@ public class CoreWorkload extends Workload {
     }
     fieldlengthgenerator = CoreWorkload.getFieldLengthGenerator(p);
 
+    String poolFile = p.getProperty(VALUE_POOL_PROPERTY);
+    if (poolFile != null && !poolFile.isEmpty()) {
+      try {
+        valuePool = ValuePool.getInstance(poolFile);
+      } catch (java.io.IOException e) {
+        throw new WorkloadException(
+            "Failed to load value pool from " + poolFile + ": " + e.getMessage(), e);
+      }
+    }
     recordcount =
         Long.parseLong(p.getProperty(Client.RECORD_COUNT_PROPERTY, Client.DEFAULT_RECORD_COUNT));
     if (recordcount == 0) {
@@ -593,14 +607,15 @@ public class CoreWorkload extends Workload {
     if (dataintegrity) {
       data = new StringByteIterator(buildDeterministicValue(key, fieldkey));
     } else {
-        if (fieldkey.equals("field1")) {
+        if (fieldkey.equals("field1")) {  // for two column
           data = new RandomByteIterator(1000);
         } else {
-             data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+            //data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+            if (valuePool != null) {
+                data = new PoolByteIterator(valuePool.nextValue());
+            }
             //int size = fieldlengthgenerator.nextValue().intValue();
 	    //data = new WikipediaByteIterator(key, size);
-
-
         }
     }
     value.put(fieldkey, data);

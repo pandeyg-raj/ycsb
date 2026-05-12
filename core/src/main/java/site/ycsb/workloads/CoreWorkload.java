@@ -603,7 +603,7 @@ public class CoreWorkload extends Workload {
     HashMap<String, ByteIterator> value = new HashMap<>();
 
     String fieldkey = fieldnames.get(fieldchooser.nextValue().intValue());
-    ByteIterator data;
+    ByteIterator data = null;
     if (dataintegrity) {
       data = new StringByteIterator(buildDeterministicValue(key, fieldkey));
     } else {
@@ -630,12 +630,15 @@ public class CoreWorkload extends Workload {
     HashMap<String, ByteIterator> values = new HashMap<>();
 
     for (String fieldkey : fieldnames) {
-      ByteIterator data;
+      ByteIterator data = null;
       if (dataintegrity) {
         data = new StringByteIterator(buildDeterministicValue(key, fieldkey));
       } else {
         // fill with random data
-	        data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+	        //data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
+        if (valuePool != null) {
+                data = new PoolByteIterator(valuePool.nextValue());
+            }
 	//int size = fieldlengthgenerator.nextValue().intValue();
 	//data = new WikipediaByteIterator(key, size);
 

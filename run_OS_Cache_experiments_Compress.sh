@@ -11,8 +11,8 @@ RECORD_COUNT=10000000         # was 100000000; 10M * 10KB == 100GB target
 
 # Workloads definition
 WORKLOAD_LABELS=("read90" "read50")
-READ_PROPORTIONS=("readproportion=0.9 -p insertproportion=0.1" \
-                  "readproportion=0.5 -p insertproportion=0.5")
+READ_PROPORTIONS=("readproportion=0.9 -p updateproportion=0.1 -p insertproportion=0" \
+                  "readproportion=0.5 -p updateproportion=0.5 -p insertproportion=0")
 
 # OS cache sizes (in GB)
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")

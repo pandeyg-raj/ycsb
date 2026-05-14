@@ -46,7 +46,7 @@ fi
 # =====================================================================
 # Experiment dimensions (workload fixed, not looped)
 # =====================================================================
-DATASETS=("jpeg" "wiki" "hdfs")
+DATASETS=("wiki" "hdfs" "jpeg")
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
 
 TOTAL=$(( ${#DATASETS[@]} * ${#CACHE_SIZES[@]} ))   # 3 x 5 = 15

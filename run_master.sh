@@ -1,26 +1,42 @@
 #!/bin/bash
-# Master script — runs all experiments for one configuration label.
-# Calls run_single.sh for each (dataset × cache_size × workload) combination.
-# Place this file in the SAME directory as run_single.sh.
+# Master script — runs 15 experiments for one (label × workload) combination.
+# Place in the SAME directory as run_single.sh.
 #
 # Usage:
-#   ./run_master.sh EC_ComprOn
-#   ./run_master.sh REP_ComprOff
+#   ./run_master.sh <label> <workload>
 #
-# All echo output from run_single.sh appears on your terminal AND is
-# saved to master_<label>.log in the current directory.
+# Examples:
+#   ./run_master.sh EC_ComprOn  read90
+#   ./run_master.sh EC_ComprOn  read50
+#   ./run_master.sh EC_ComprOff read90
+#   ./run_master.sh EC_ComprOff read50
+#   ./run_master.sh REP_ComprOn read90
+#   ./run_master.sh REP_ComprOn read50
+#   (etc.)
+#
+# Each run = 3 datasets × 5 cache sizes = 15 experiments
+#
+# Echo output:  shown on terminal AND saved to master_<label>_<workload>.log
+# YCSB results: saved in result_<label>_<dataset>_<cache>_<workload>/ per experiment
 
 LABEL=$1
+WORKLOAD=$2
 
-if [ -z "$LABEL" ]; then
-  echo "Usage: $0 <label>"
-  echo "  label: EC_ComprOn | EC_ComprOff | REP_ComprOn | REP_ComprOff"
+if [ -z "$LABEL" ] || [ -z "$WORKLOAD" ]; then
+  echo "Usage: $0 <label> <workload>"
+  echo "  label   : EC_ComprOn | EC_ComprOff | REP_ComprOn | REP_ComprOff"
+  echo "  workload: read90 | read50"
   exit 1
 fi
 
-# Directory of this script — run_single.sh must be here too
+if [ "$WORKLOAD" != "read90" ] && [ "$WORKLOAD" != "read50" ]; then
+  echo "ERROR: Unknown workload '$WORKLOAD'. Use: read90 | read50"
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SINGLE="${SCRIPT_DIR}/run_single.sh"
+MASTER_LOG="${SCRIPT_DIR}/master_${LABEL}_${WORKLOAD}.log"
 
 if [ ! -x "$SINGLE" ]; then
   echo "ERROR: run_single.sh not found or not executable at $SINGLE"
@@ -28,68 +44,58 @@ if [ ! -x "$SINGLE" ]; then
 fi
 
 # =====================================================================
-# Ask for threads ONCE — passed to every run_single.sh call
-# =====================================================================
-echo "============================================================"
-echo " Master script: $LABEL"
-echo "============================================================"
-echo "How many write threads?"
-read WTHREADS
-echo "How many read threads?"
-read RTHREADS
-
-# =====================================================================
-# Experiment dimensions
+# Experiment dimensions (workload fixed, not looped)
 # =====================================================================
 DATASETS=("jpeg" "wiki" "hdfs")
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
-WORKLOADS=("read90" "read50")
 
-TOTAL=$(( ${#DATASETS[@]} * ${#CACHE_SIZES[@]} * ${#WORKLOADS[@]} ))
+TOTAL=$(( ${#DATASETS[@]} * ${#CACHE_SIZES[@]} ))   # 3 x 5 = 15
 COUNT=0
 
-# Master log — all echo from this script AND run_single.sh goes here too
-MASTER_LOG="${SCRIPT_DIR}/master_${LABEL}.log"
-
-echo "Total experiments: $TOTAL"
-echo "Master log: $MASTER_LOG"
-echo ""
+echo "============================================================" | tee -a "$MASTER_LOG"
+echo " Master script started"                                       | tee -a "$MASTER_LOG"
+echo " Label      : $LABEL"                                         | tee -a "$MASTER_LOG"
+echo " Workload   : $WORKLOAD"                                      | tee -a "$MASTER_LOG"
+echo " Total runs : $TOTAL  (3 datasets x 5 cache sizes)"           | tee -a "$MASTER_LOG"
+echo " Master log : $MASTER_LOG"                                    | tee -a "$MASTER_LOG"
+echo "============================================================" | tee -a "$MASTER_LOG"
 
 # =====================================================================
 # Main loop
 # =====================================================================
 for DATASET in "${DATASETS[@]}"; do
   for CACHE_SIZE in "${CACHE_SIZES[@]}"; do
-    for WORKLOAD in "${WORKLOADS[@]}"; do
-      COUNT=$(( COUNT + 1 ))
+    COUNT=$(( COUNT + 1 ))
 
-      echo ""
-      echo "############################################################"
-      echo "# Experiment $COUNT / $TOTAL"
-      echo "#   Label     : $LABEL"
-      echo "#   Dataset   : $DATASET"
-      echo "#   Cache     : $CACHE_SIZE"
-      echo "#   Workload  : $WORKLOAD"
-      echo "############################################################"
+    echo "" | tee -a "$MASTER_LOG"
+    echo "############################################################" | tee -a "$MASTER_LOG"
+    echo "# Experiment $COUNT / $TOTAL"                               | tee -a "$MASTER_LOG"
+    echo "#   Label    : $LABEL"                                       | tee -a "$MASTER_LOG"
+    echo "#   Workload : $WORKLOAD"                                    | tee -a "$MASTER_LOG"
+    echo "#   Dataset  : $DATASET"                                     | tee -a "$MASTER_LOG"
+    echo "#   Cache    : $CACHE_SIZE"                                  | tee -a "$MASTER_LOG"
+    echo "############################################################" | tee -a "$MASTER_LOG"
 
-      # Pause here — user wipes cluster and sets cache before each run
-      read -p "Wipe Cassandra + restart with $CACHE_SIZE cache, then press Enter..."
+    # --- 3x confirmation before each experiment ---
+    read -p "[1/3] Wipe Cassandra data + restart cluster for $DATASET $LABEL, then press Enter..."
+    read -p "[2/3] nodetool status shows all nodes UN? Press Enter to confirm..."
+    read -p "[3/3] Cache set to $CACHE_SIZE? Press Enter to START experiment $COUNT/$TOTAL..."
 
-      # Call run_single.sh — passes threads, no interactive prompts needed
-      # tee appends output to master log while still showing on terminal
-      "$SINGLE" "$DATASET" "$CACHE_SIZE" "$WORKLOAD" "$LABEL" \
-        "$WTHREADS" "$RTHREADS" 2>&1 | tee -a "$MASTER_LOG"
+    echo "$(date): Starting $LABEL | $WORKLOAD | $DATASET | $CACHE_SIZE" | tee -a "$MASTER_LOG"
 
-      echo ""
-      echo "# Done $COUNT/$TOTAL: $LABEL | $DATASET | $CACHE_SIZE | $WORKLOAD"
-      echo "############################################################"
-      echo ""
+    # --- Call run_single.sh ---
+    "$SINGLE" "$DATASET" "$CACHE_SIZE" "$WORKLOAD" "$LABEL" 2>&1 | tee -a "$MASTER_LOG"
 
-    done
+    echo "$(date): Finished $LABEL | $WORKLOAD | $DATASET | $CACHE_SIZE" | tee -a "$MASTER_LOG"
+    echo "############################################################"  | tee -a "$MASTER_LOG"
+
   done
 done
 
-echo "============================================================"
-echo " All $TOTAL experiments completed for label: $LABEL"
-echo " Master log: $MASTER_LOG"
-echo "============================================================"
+echo "" | tee -a "$MASTER_LOG"
+echo "============================================================" | tee -a "$MASTER_LOG"
+echo " ALL $TOTAL EXPERIMENTS DONE"                                | tee -a "$MASTER_LOG"
+echo " Label    : $LABEL"                                          | tee -a "$MASTER_LOG"
+echo " Workload : $WORKLOAD"                                       | tee -a "$MASTER_LOG"
+echo " Master log: $MASTER_LOG"                                    | tee -a "$MASTER_LOG"
+echo "============================================================" | tee -a "$MASTER_LOG"

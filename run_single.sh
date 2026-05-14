@@ -1,52 +1,39 @@
 #!/bin/bash
 # Single independent experiment.
+# Called by run_master.sh — no interactive prompts.
+# Can also be run standalone for a single experiment.
 #
-# Standalone usage (interactive):
+# Usage:
+#   ./run_single.sh <dataset> <cache_size> <workload> <label>
+#
+# Examples:
 #   ./run_single.sh jpeg 28GB read50 EC_ComprOn
-#
-# Called from master script (non-interactive):
-#   ./run_single.sh jpeg 28GB read50 EC_ComprOn <wthreads> <rthreads>
-#   ./run_single.sh jpeg 28GB read50 EC_ComprOn 8 16
+#   ./run_single.sh wiki 40GB read90 REP_ComprOff
 
 DATASET=$1
 CACHE_SIZE=$2
 WORKLOAD=$3
 LABEL=$4
-WTHREADS=$5    # optional — prompted if missing
-RTHREADS=$6    # optional — prompted if missing
 
-# =====================================================================
-# Validate required args
-# =====================================================================
 if [ -z "$DATASET" ] || [ -z "$CACHE_SIZE" ] || [ -z "$WORKLOAD" ] || [ -z "$LABEL" ]; then
-  echo "Usage: $0 <dataset> <cache_size> <workload> <label> [wthreads] [rthreads]"
+  echo "Usage: $0 <dataset> <cache_size> <workload> <label>"
   echo "  dataset    : jpeg | wiki | hdfs"
   echo "  cache_size : 16GB | 28GB | 40GB | 52GB | 64GB"
   echo "  workload   : read90 | read50"
   echo "  label      : e.g. EC_ComprOn | REP_ComprOff"
-  echo "  wthreads   : write threads (prompted if omitted)"
-  echo "  rthreads   : read threads  (prompted if omitted)"
   exit 1
 fi
 
-# Prompt for threads only if not passed in
-if [ -z "$WTHREADS" ]; then
-  echo "How many write threads?"; read WTHREADS
-fi
-if [ -z "$RTHREADS" ]; then
-  echo "How many read threads?"; read RTHREADS
-fi
-
 # =====================================================================
-# Config
+# Config — all hardcoded
 # =====================================================================
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
+THREADS=16
 FIELD_LENGTH=10000
 RECORD_COUNT=8000000
 WARMUP_OPS=5000000
-MEASURE_OPS=5000000
-REPEAT=4
+MEASURE_OPS=20000000       # 4 x 5M — one run instead of 4 iterations
 
 POOL_DIR=/mydata/compressData
 
@@ -84,16 +71,17 @@ echo "============================================================"
 echo " Label      : $LABEL"
 echo " Dataset    : $DATASET  ->  $POOL_FILE"
 echo " Cache      : $CACHE_SIZE"
-echo " Workload   : $WORKLOAD  ->  $READ_PCT"
-echo " Threads    : write=$WTHREADS  read=$RTHREADS"
+echo " Workload   : $WORKLOAD"
+echo " Threads    : $THREADS (read + write)"
+echo " Measure ops: $MEASURE_OPS"
 echo " Output dir : $OUT_DIR"
 echo "============================================================"
 
 # =====================================================================
-# Load
+# [1/3] Load
 # =====================================================================
 echo ">>> [1/3] Load: $RECORD_COUNT records x ${FIELD_LENGTH}B"
-$YCSB_DIR load $DB -threads $WTHREADS \
+$YCSB_DIR load $DB -threads $THREADS \
   -p recordcount=${RECORD_COUNT} \
   -p fieldlength=${FIELD_LENGTH} \
   -p fieldcount=1 \
@@ -104,10 +92,10 @@ $YCSB_DIR load $DB -threads $WTHREADS \
 echo ">>> [1/3] Load done"
 
 # =====================================================================
-# Warmup
+# [2/3] Warmup
 # =====================================================================
 echo ">>> [2/3] Warmup: $WARMUP_OPS ops (50/50 update)"
-$YCSB_DIR run $DB -threads $RTHREADS \
+$YCSB_DIR run $DB -threads $THREADS \
   -p operationcount=${WARMUP_OPS} \
   -p readproportion=0.5 -p updateproportion=0.5 -p insertproportion=0 \
   -p recordcount=${RECORD_COUNT} \
@@ -122,25 +110,22 @@ $YCSB_DIR run $DB -threads $RTHREADS \
 echo ">>> [2/3] Warmup done"
 
 # =====================================================================
-# Measurement
+# [3/3] Measurement — single run, same total ops as 4x5M
 # =====================================================================
-echo ">>> [3/3] Measurement: $REPEAT x $WORKLOAD"
-for iter in $(seq 1 $REPEAT); do
-  echo "---  Run ${iter}/${REPEAT}"
-  $YCSB_DIR run $DB -threads $RTHREADS \
-    -p operationcount=${MEASURE_OPS} \
-    -p ${READ_PCT} \
-    -p recordcount=${RECORD_COUNT} \
-    -p fieldlength=${FIELD_LENGTH} \
-    -p fieldcount=1 \
-    -p valuepool.file=${POOL_FILE} \
-    -p cassandra.writeconsistencylevel=QUORUM \
-    -p cassandra.readconsistencylevel=QUORUM \
-    -p measurement.raw.output_file="${OUT_DIR}/${LABEL}_${DATASET}_${CACHE_SIZE}_${WORKLOAD}_iter${iter}.scr" \
-    -P commonworkload \
-    -s >> "$LOG" 2>&1
-  echo "---  Run ${iter}/${REPEAT} done"
-done
+echo ">>> [3/3] Measurement: $MEASURE_OPS ops of $WORKLOAD"
+$YCSB_DIR run $DB -threads $THREADS \
+  -p operationcount=${MEASURE_OPS} \
+  -p ${READ_PCT} \
+  -p recordcount=${RECORD_COUNT} \
+  -p fieldlength=${FIELD_LENGTH} \
+  -p fieldcount=1 \
+  -p valuepool.file=${POOL_FILE} \
+  -p cassandra.writeconsistencylevel=QUORUM \
+  -p cassandra.readconsistencylevel=QUORUM \
+  -p measurement.raw.output_file="${OUT_DIR}/${LABEL}_${DATASET}_${CACHE_SIZE}_${WORKLOAD}.scr" \
+  -P commonworkload \
+  -s >> "$LOG" 2>&1
+echo ">>> [3/3] Measurement done"
 
 echo "============================================================"
 echo " DONE: $LABEL | $DATASET | $CACHE_SIZE | $WORKLOAD"

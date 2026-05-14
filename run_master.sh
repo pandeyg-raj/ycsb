@@ -77,7 +77,7 @@ for DATASET in "${DATASETS[@]}"; do
     echo "############################################################" | tee -a "$MASTER_LOG"
 
     # --- 3x confirmation before each experiment ---
-    read -p "[1/3] DO NOW: (1) wipe Cassandra data  (2) set OS cache to ${CACHE_SIZE}  (3) start Cassandra. Press Enter when Cassandra is starting..."
+    read -p "[1/3] DO NOW: (1) wipe Cassandra data  (2) set OS cache to ${CACHE_SIZE}  (3) create table based on label (4) start Cassandra. Press Enter when Cassandra is starting..."
     read -p "[2/3] nodetool status all nodes UN? Press Enter to confirm..."
     read -p "[3/3] Ready to run: $LABEL | $DATASET | ${CACHE_SIZE} | $WORKLOAD. Press Enter to START experiment $COUNT/$TOTAL..."
 

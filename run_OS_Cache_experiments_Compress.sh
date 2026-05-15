@@ -9,12 +9,12 @@ RECORD_COUNT=10000000
 
 # Standard YCSB workloads A, B, C using updateproportion (updates existing keys)
 # updateproportion → writes go to existing keys → disk stays flat, correct cache behavior
-WORKLOAD_LABELS=("workloadC" "workloadB" "workloadA" "workloadD")
+WORKLOAD_LABELS=("workloadA" "workloadD" "workloadB" "workloadC")
 READ_PROPORTIONS=(
-    "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"   # C: read only
-    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"  # B: read mostly
-    "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"  # A: update heavy
-    "readproportion=0.95 -p updateproportion=0.0  -p insertproportion=0.05 -p requestdistrib=latest"  # D: read latest
+    "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"                          # A: worst case — 50% updates
+    "readproportion=0.95 -p updateproportion=0.0  -p insertproportion=0.05 -p requestdistrib=latest"  # D: 5% inserts
+    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                          # B: 5% updates
+    "readproportion=1.0  -p updateproportion=0.0  -p insertproportion=0"                          # C: read only, best case
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")

@@ -614,6 +614,9 @@ public class CoreWorkload extends Workload {
             if (valuePool != null) {
                 data = new PoolByteIterator(valuePool.nextValue());
             }
+            else {
+                data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue()); // ← restore this
+            }
             //int size = fieldlengthgenerator.nextValue().intValue();
 	    //data = new WikipediaByteIterator(key, size);
         }
@@ -638,7 +641,10 @@ public class CoreWorkload extends Workload {
 	        //data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue());
         if (valuePool != null) {
                 data = new PoolByteIterator(valuePool.nextValue());
-            }
+        }
+        else {
+                data = new RandomByteIterator(fieldlengthgenerator.nextValue().longValue()); // ← restore this
+        }
 	//int size = fieldlengthgenerator.nextValue().intValue();
 	//data = new WikipediaByteIterator(key, size);
 

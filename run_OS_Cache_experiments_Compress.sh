@@ -175,8 +175,6 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
             -p operationcount=$WARMUP_OPS \
             -p ${READ_PROPORTIONS[1]} \
             -p recordcount=${RECORD_COUNT} \
-            -p fieldlength=${FIELD_LENGTH} \
-            -p valuepool.file=${POOL_FILE} \
             -p measurement.raw.output_file="$WARMUP_FILE" \
             -p cassandra.writeconsistencylevel=QUORUM \
             -p cassandra.readconsistencylevel=QUORUM \

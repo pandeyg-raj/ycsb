@@ -8,7 +8,7 @@ REPEAT=5
 FIELD_LENGTH=10000
 RECORD_COUNT=10000000
 
-WORKLOAD_LABELS=("read100" "read95" "read50")
+WORKLOAD_LABELS=("read90" "read50")
 READ_PROPORTIONS=("readproportion=0.9 -p insertproportion=0.1" \
                   "readproportion=0.5 -p insertproportion=0.5")
 

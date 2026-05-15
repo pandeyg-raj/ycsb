@@ -47,18 +47,21 @@ restart_cluster() {
         echo ""
         echo "--- $ip ---"
 
-        # [1/3] Kill — your tested command
+        # [1/3] Kill
+        # Verified: exits 0, sends SIGTERM for graceful shutdown
         echo "  [1/3] Stopping Cassandra..."
         ssh ${SSH_USER}@${ip} \
             "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true"
 
-        # Wait for death — exit 0 = still running, exit 1 = stopped
-        # Verified: ps -a | grep java returns 0 when running, 1 when stopped
+        # Wait for death
+        # Verified: ps -ef | grep '[j]ava' | grep -i 'cassandra' → exit 0=running, exit 1=stopped
+        # ps -a does NOT work for daemons — must use ps -ef
         local kill_attempts=0
-        while ssh ${SSH_USER}@${ip} "ps -a | grep java > /dev/null 2>&1"; do
+        while ssh ${SSH_USER}@${ip} \
+            "ps -ef | grep '[j]ava' | grep -i 'cassandra' > /dev/null 2>&1"; do
             sleep 10
             kill_attempts=$((kill_attempts + 1))
-            echo "  Waiting for Cassandra to stop... (${kill_attempts})"
+            echo "  Waiting for stop... (${kill_attempts}/6)"
             if [ "$kill_attempts" -ge 6 ]; then
                 echo "  Still running after 1 min — force killing..."
                 ssh ${SSH_USER}@${ip} \
@@ -69,10 +72,9 @@ restart_cluster() {
         done
         echo "  [1/3] Stopped"
 
-        # [2/3] Set cgroup + evict + start — your tested command
-        # cd sets working dir so bin/cassandra and data/ resolve correctly
-        # \$\$ → remote shell PID → Cassandra child inherits cgroup
-        # ${mem_bytes} → already a number, expands locally → correct on remote
+        # [2/3] Set cgroup + evict + start
+        # Verified: exit 0, Cassandra PID visible in ps -ef, in cgroup.procs
+        # \$\$ → remote shell PID, ${mem_bytes} → locally expanded number
         echo "  [2/3] Setting ${cache_size} limit, evicting cache, starting Cassandra..."
         ssh ${SSH_USER}@${ip} \
             "cd ${CASS_DIR} && \
@@ -81,18 +83,17 @@ restart_cluster() {
              vmtouch -e data/ > /dev/null 2>&1 && \
              bin/cassandra > /dev/null 2>&1"
 
-        # [3/3] Wait for this node to be UN
-        # Verified: nodetool status | grep IP | grep -q UN returns 0 when UN
+        # [3/3] Wait for UN
+        # Verified: nodetool status | grep IP | grep -q UN → exit 0 when ready
         echo "  [3/3] Waiting for ${ip} to be UN..."
         local start_attempts=0
         until ssh ${SSH_USER}@${ip} \
             "${CASS_DIR}/bin/nodetool status 2>/dev/null | grep '${ip}' | grep -q 'UN'"; do
             sleep 10
             start_attempts=$((start_attempts + 1))
-            echo "  Waiting for UN... (${start_attempts})"
+            echo "  Waiting for UN... (${start_attempts}/30)"
             if [ "$start_attempts" -ge 30 ]; then
-                echo "  ERROR: ${ip} did not become UN within 5 minutes."
-                echo "  Check ${CASS_DIR}/logs/system.log on ${ip}."
+                echo "  ERROR: ${ip} not UN after 5 min. Check ${CASS_DIR}/logs/system.log"
                 exit 1
             fi
         done

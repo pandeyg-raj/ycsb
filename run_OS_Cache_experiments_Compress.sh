@@ -60,6 +60,9 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
   for cache_size in "${CACHE_SIZES[@]}"; do
     echo
     echo ">>> Prepare Cassandra with ${cache_size} OS cache (${COMPRESS_LABEL})"
+
+    # here stop cassandra gracefully on all nodes, one by one and re start cassandra on all nodes with ${cache_size}
+    
     read -p "Start Cassandra with ${cache_size} and press Enter to continue..."
 
     # --- Warm-up phase (once per cache size) ---

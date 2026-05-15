@@ -61,9 +61,39 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     echo
     echo ">>> Prepare Cassandra with ${cache_size} OS cache (${COMPRESS_LABEL})"
 
-    # here stop cassandra gracefully on all nodes, one by one and re start cassandra on all nodes with ${cache_size}
+    # review start
     
-    read -p "Start Cassandra with ${cache_size} and press Enter to continue..."
+    # here stop cassandra gracefully on all nodes, one by one and re start cassandra on all nodes with ${cache_size}
+    # --- Restart Cassandra cluster with target memory/cache size ---
+    echo "Stopping Cassandra on all nodes..."
+    
+    for node in {2..6}; do
+      ssh rzp5412@10.10.1.$node "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill"
+      # Wait until java process disappears
+        while ssh rzp5412@10.10.1.$node "ps -a | grep java > /dev/null"; do
+          sleep 5
+        done
+        echo "Cassandra stopped on 10.10.1.$node"
+        # Start Cassandra with target memory limit
+        ssh rzp5412@10.10.1.$node "
+        echo \$(( ${cache_size} * 1024 * 1024 * 1024 )) | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max && \
+        echo \$$ | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs && \
+        vmtouch -e /mydata/cassandra/data/ && \
+        nohup /mydata/cassandra/bin/cassandra > cassandra.log 2>&1 &
+        "
+        # Wait until nodetool works
+        echo "Waiting for Cassandra startup on 10.10.1.$node ..."
+        until rzp5412@10.10.1.$node "/mydata/cassandra/bin/nodetool status > /dev/null 2>&1"; do
+          sleep 5
+        done
+      
+        echo "Cassandra is up on 10.10.1.$node"
+    done
+
+    # review end
+  
+    #read -p "Start Cassandra with ${cache_size} and press Enter to continue..."
+    
 
     # --- Warm-up phase (once per cache size) ---
     WARMUP_FILE="${BASE_OUT_DIR}_${cache_size}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_Warmup${FIELD_LENGTH}Bytes_run.scr"

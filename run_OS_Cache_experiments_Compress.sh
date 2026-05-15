@@ -94,8 +94,6 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
           -p operationcount=$MEASURE_OPS \
           -p ${READ_PCT} \
           -p recordcount=${RECORD_COUNT} \
-          -p fieldlength=${FIELD_LENGTH} \
-          -p valuepool.file=${POOL_FILE} \
           -p measurement.raw.output_file="$MEASURE_FILE" \
           -p cassandra.writeconsistencylevel=QUORUM \
           -p cassandra.readconsistencylevel=QUORUM \

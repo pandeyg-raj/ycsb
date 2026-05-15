@@ -55,15 +55,15 @@ restart_cluster() {
         ssh ${SSH_USER}@${ip} \
             "${CASS_DIR}/bin/nodetool stopdaemon 2>/dev/null || true"
 
-        # Safety net: kill any lingering Cassandra JVM
+        # stopdaemon is authoritative — if it said "Cassandra has shutdown", it's done.
+        # Sleep gives the JVM a moment to fully release file handles and ports.
+        sleep 10
+        
+        # Safety kill for anything still lingering (shouldn't be needed but harmless)
         ssh ${SSH_USER}@${ip} \
             "pgrep -f 'org.apache.cassandra' | xargs -r kill -9 2>/dev/null; true"
-
-        # Wait until process is fully gone
-        while ssh ${SSH_USER}@${ip} \
-                "pgrep -f 'org.apache.cassandra' > /dev/null 2>&1"; do
-            sleep 10
-        done
+        
+        sleep 10
         echo "  [1/4] Stopped"
 
         # ---- [2/4] Set cgroup limit ----------------------------------------

@@ -74,11 +74,22 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
           sleep 5
         done
         echo "Cassandra stopped on 10.10.1.$node"
+        
         # Start Cassandra with target memory limit
+        #strip GB from cache size
+        CACHE_GB=$(echo ${cache_size} | sed 's/GB//')
+        MEM_BYTES=$((CACHE_GB * 1024 * 1024 * 1024))
+        CASS_PID=""
+        CASS_PID=$(ssh rzp5412@10.10.1.$node "pgrep -f CassandraDaemon | head -n 1")
+        if [[ -z "$CASS_PID" ]]; then
+          echo "ERROR: Cassandra PID not found on 10.10.1.$node"
+          exit 1
+        fi
+        
         ssh rzp5412@10.10.1.$node "
-        echo \$(( ${cache_size} * 1024 * 1024 * 1024 )) | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max && \
-        echo \$$ | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs && \
-        vmtouch -e /mydata/cassandra/data/ && \
+        echo $MEM_BYTES | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max
+        echo $CASS_PID | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs
+        vmtouch -e /mydata/cassandra/data/
         nohup /mydata/cassandra/bin/cassandra > cassandra.log 2>&1 &
         "
         # Wait until nodetool works

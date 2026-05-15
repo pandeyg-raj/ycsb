@@ -39,7 +39,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
   echo ">>> Compression dataset: ${COMPRESS_LABEL}"
   echo ">>> Pool file:          ${POOL_FILE}"
   echo "============================================================"
-  read -p "Wipe Cassandra data + restart cluster, then press Enter to continue..."
+  read -p "Wipe Cassandra data + restart in full memory, CREATE TABLE according to LABEL, then press Enter to continue..."
 
   BASE_OUT_DIR="result_OS_CacheCompress_${COMPRESS_LABEL}"
   mkdir -p "$BASE_OUT_DIR"

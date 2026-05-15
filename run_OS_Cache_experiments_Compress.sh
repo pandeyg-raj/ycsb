@@ -3,18 +3,17 @@
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
 MEASURE_OPS=10000000
-WARMUP_OPS=500000
+WARMUP_OPS=5000000
 FIELD_LENGTH=10000
 RECORD_COUNT=10000000
 
-# Standard YCSB workloads A, B, C using updateproportion (updates existing keys)
-# updateproportion → writes go to existing keys → disk stays flat, correct cache behavior
+# Standard YCSB workloads A, B, C, D — worst case (A) first for early failure detection
 WORKLOAD_LABELS=("workloadA" "workloadD" "workloadB" "workloadC")
 READ_PROPORTIONS=(
-    "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"                          # A: worst case — 50% updates
-    "readproportion=0.95 -p updateproportion=0.0  -p insertproportion=0.05 -p requestdistrib=latest"  # D: 5% inserts
-    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                          # B: 5% updates
-    "readproportion=1.0  -p updateproportion=0.0  -p insertproportion=0"                          # C: read only, best case
+    "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"                           # A: 50% update (worst case)
+    "readproportion=0.95 -p updateproportion=0.0  -p insertproportion=0.05 -p requestdistrib=latest" # D: read latest
+    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                           # B: read mostly
+    "readproportion=1.0  -p updateproportion=0.0  -p insertproportion=0"                           # C: read only
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
@@ -27,11 +26,10 @@ SSH_USER=rzp5412
 CASS_DIR=/mydata/cassandra
 
 # ---------------------------------------------------------------
-# HARD_RESTART_PER_WORKLOAD controls experiment flow:
-#   0 → Normal:  load once per dataset, restart per cache size,
-#                run all workloads on the same data
-#   1 → Hard:    before each workload, wipe cluster + reload +
-#                warmup (saves disk space, each workload starts fresh)
+# HARD_RESTART_PER_WORKLOAD=1 → each workload starts from clean cluster.
+#   Uses snapshot after first load to avoid reloading from YCSB each time.
+#   First workload: YCSB load → snapshot. Subsequent: instant restore.
+# HARD_RESTART_PER_WORKLOAD=0 → load once, restart per cache size.
 HARD_RESTART_PER_WORKLOAD=1
 # ---------------------------------------------------------------
 
@@ -52,6 +50,87 @@ log_banner() {
 }
 
 # =====================================================================
+# stop_cluster
+#   Stops Cassandra on all nodes. No wipe, no restart.
+#   Used before taking snapshot to ensure data is fully flushed to disk.
+# =====================================================================
+stop_cluster() {
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+
+    echo ""
+    echo "=== Stopping Cassandra on all nodes ==="
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        echo "  Stopping ${ip}..."
+        ssh ${SSH_USER}@${ip} \
+            "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true"
+
+        local attempts=0
+        while ssh ${SSH_USER}@${ip} \
+            "ps -ef | grep '[j]ava' | grep -i 'cassandra' > /dev/null 2>&1"; do
+            sleep 10
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 6 ]; then
+                ssh ${SSH_USER}@${ip} \
+                    "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill -9 2>/dev/null; true"
+                sleep 5; break
+            fi
+        done
+        echo "  ${ip} stopped"
+    done
+    echo "=== All nodes stopped ==="
+}
+
+# =====================================================================
+# take_snapshot
+#   Saves a hard-link copy of data/ as data_snapshot/ on each node.
+#   Hard links = zero extra disk space, instant to create.
+#   Cassandra must be stopped before calling this.
+#   Call once per dataset after the first YCSB load.
+# =====================================================================
+take_snapshot() {
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+
+    echo ""
+    echo "=== Taking data snapshot (hard links, zero extra disk) ==="
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        echo "  Snapshotting ${ip}..."
+        ssh ${SSH_USER}@${ip} \
+            "rm -rf ${CASS_DIR}/data_snapshot && \
+             cp -rl ${CASS_DIR}/data ${CASS_DIR}/data_snapshot"
+        echo "  Snapshot done on ${ip}"
+    done
+    echo "=== Snapshot complete ==="
+}
+
+# =====================================================================
+# restore_from_snapshot
+#   Replaces current data/ with a fresh hard-link copy from data_snapshot/.
+#   Near-instant — recreates directory entries, no actual data copying.
+#   Cassandra must be stopped before calling this.
+#   Call for all workloads after the first (instead of YCSB load).
+# =====================================================================
+restore_from_snapshot() {
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+
+    echo ""
+    echo "=== Restoring data from snapshot (instant) ==="
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        echo "  Restoring ${ip}..."
+        ssh ${SSH_USER}@${ip} \
+            "rm -rf ${CASS_DIR}/data && \
+             cp -rl ${CASS_DIR}/data_snapshot ${CASS_DIR}/data"
+        echo "  Restore done on ${ip}"
+    done
+    echo "=== Restore complete ==="
+}
+
+# =====================================================================
 # restart_cluster <cache_size>
 #   Rolling restart — one node at a time, seeds first.
 #   Evicts page cache and starts Cassandra under cgroup memory limit.
@@ -66,14 +145,13 @@ restart_cluster() {
     local mem_bytes=$((cache_gb * 1024 * 1024 * 1024))
 
     echo ""
-    echo "=== Rolling restart: nodes ${nodes[*]}, cache=${cache_size} (${mem_bytes} bytes) ==="
+    echo "=== Soft restart: nodes ${nodes[*]}, cache=${cache_size} (${mem_bytes} bytes) ==="
 
     for node in "${nodes[@]}"; do
         local ip="10.10.1.$node"
         echo ""
         echo "--- $ip ---"
 
-        # [1/3] Kill — verified: SIGTERM, exits 0
         echo "  [1/3] Stopping Cassandra..."
         ssh ${SSH_USER}@${ip} \
             "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true"
@@ -85,16 +163,13 @@ restart_cluster() {
             kill_attempts=$((kill_attempts + 1))
             echo "  Waiting for stop... (${kill_attempts}/6)"
             if [ "$kill_attempts" -ge 6 ]; then
-                echo "  Still running — force killing..."
                 ssh ${SSH_USER}@${ip} \
                     "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill -9 2>/dev/null; true"
-                sleep 5
-                break
+                sleep 5; break
             fi
         done
         echo "  [1/3] Stopped"
 
-        # [2/3] Set cgroup + evict page cache + start
         echo "  [2/3] Setting ${cache_size} limit, evicting cache, starting Cassandra..."
         ssh ${SSH_USER}@${ip} \
             "cd ${CASS_DIR} && \
@@ -103,7 +178,6 @@ restart_cluster() {
              vmtouch -e data/ > /dev/null 2>&1 && \
              bin/cassandra > /dev/null 2>&1"
 
-        # [3/3] Wait for UN
         echo "  [3/3] Waiting for ${ip} to be UN..."
         local start_attempts=0
         until ssh ${SSH_USER}@${ip} \
@@ -120,18 +194,17 @@ restart_cluster() {
     done
 
     echo ""
-    echo "=== All nodes up. Cluster ready with ${cache_size} cache. ==="
+    echo "=== Soft restart complete. Cluster ready with ${cache_size} cache. ==="
 }
 
 # =====================================================================
 # hard_restart_cluster
-#   Wipes ALL data on every node, restarts with FULL memory (no cgroup limit)
+#   Wipes ALL data on every node, restarts with FULL memory (no cgroup),
 #   then creates the YCSB table using the pre-selected binary.
-#   Does NOT load data — caller is responsible for loading after.
-#   Full memory allows faster loading. Caller should call restart_cluster(cache_size)
-#   after loading to apply the cgroup limit before warmup.
-#
-#   Uses CREATE_TABLE_BIN set at startup based on EC/REP + compression.
+#   Full memory allows faster loading.
+#   Caller must: load data → stop_cluster → take_snapshot (first time)
+#             or: restore_from_snapshot (subsequent times)
+#   Then call restart_cluster(cache_size) to apply cgroup limit.
 # =====================================================================
 hard_restart_cluster() {
     local nodes
@@ -145,7 +218,6 @@ hard_restart_cluster() {
         echo ""
         echo "--- $ip ---"
 
-        # [1/4] Kill
         echo "  [1/4] Stopping Cassandra..."
         ssh ${SSH_USER}@${ip} \
             "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true"
@@ -157,26 +229,21 @@ hard_restart_cluster() {
             kill_attempts=$((kill_attempts + 1))
             echo "  Waiting for stop... (${kill_attempts}/6)"
             if [ "$kill_attempts" -ge 6 ]; then
-                echo "  Still running — force killing..."
                 ssh ${SSH_USER}@${ip} \
                     "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill -9 2>/dev/null; true"
-                sleep 5
-                break
+                sleep 5; break
             fi
         done
         echo "  [1/4] Stopped"
 
-        # [2/4] Wipe data — rm -rf data/ covers all Cassandra data on this node
         echo "  [2/4] Wiping data on ${ip}..."
         ssh ${SSH_USER}@${ip} "rm -rf ${CASS_DIR}/data/"
         echo "  [2/4] Data wiped"
 
-        # [3/4] Start with full memory — no cgroup limit, fast for loading
-        # restart_cluster(cache_size) will apply the limit after loading is done
         echo "  [3/4] Starting Cassandra (full memory, no cgroup limit)..."
-        ssh ${SSH_USER}@${ip}             "cd ${CASS_DIR} && bin/cassandra > /dev/null 2>&1"
+        ssh ${SSH_USER}@${ip} \
+            "cd ${CASS_DIR} && bin/cassandra > /dev/null 2>&1"
 
-        # [4/4] Wait for UN
         echo "  [4/4] Waiting for ${ip} to be UN..."
         local start_attempts=0
         until ssh ${SSH_USER}@${ip} \
@@ -192,26 +259,33 @@ hard_restart_cluster() {
         echo "  [4/4] ${ip} is UP and NORMAL (UN)"
     done
 
-    # [5] Create YCSB table using the binary selected at startup
-    # Binary connects internally to all nodes — no arguments needed
-    echo ""
-    echo "  [5] Creating YCSB table via /mydata/${CREATE_TABLE_BIN} ..."
+    echo "  Creating YCSB table via /mydata/${CREATE_TABLE_BIN} ..."
     /mydata/${CREATE_TABLE_BIN}
-    sleep 10
-    echo "  [5] Table created"
+    echo "  Table created"
 
     echo ""
     echo "=== HARD restart complete. Cluster wiped, running at full memory. ==="
-    echo "=== Remember to load data before running workloads. ==="
 }
 
 # =====================================================================
 # Experiment setup — asked once before all loops
 # =====================================================================
+
+# Pre-flight: verify all create-table binaries exist and are executable
+echo "Checking create-table binaries..."
+for bin in create_table_ec_compr_on create_table_ec_compr_off \
+           create_table_rep_compr_on create_table_rep_compr_off; do
+    if [ ! -x "/mydata/${bin}" ]; then
+        echo "ERROR: /mydata/${bin} missing or not executable. Aborting."
+        exit 1
+    fi
+done
+echo "All binaries OK."
+echo ""
+
 echo "Is this EC or REP?"
 read EXP_LABEL
 
-# Node count double-check
 if echo "$EXP_LABEL" | grep -qi "rep"; then
     EXPECTED_NODES=3
 else
@@ -224,7 +298,6 @@ if [ "$NUM_NODES" != "$EXPECTED_NODES" ]; then
 fi
 echo "Confirmed: using ${NUM_NODES} nodes."
 
-# Compression — determines which create-table binary to use
 echo "Is compression ON or OFF? (on/off)"
 read COMPRESSION
 if echo "$EXP_LABEL" | grep -qi "rep"; then
@@ -258,7 +331,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     echo "============================================================"
     echo ">>> Compression dataset : ${COMPRESS_LABEL}"
     echo ">>> Pool file           : ${POOL_FILE}"
-    echo ">>> Mode                : $([ "$HARD_RESTART_PER_WORKLOAD" = "1" ] && echo 'HARD restart per workload' || echo 'Normal restart per cache size')"
+    echo ">>> Mode                : $([ "$HARD_RESTART_PER_WORKLOAD" = "1" ] && echo 'HARD restart per workload (snapshot)' || echo 'Normal restart per cache size')"
     echo "============================================================"
 
     BASE_OUT_DIR="result_OS_CacheCompress_${COMPRESS_LABEL}"
@@ -299,7 +372,6 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
 
             restart_cluster "$cache_size"
 
-            # Warmup: 100% read — populates OS cache, no disk growth
             WARMUP_FILE="${WARMUP_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_Warmup${FIELD_LENGTH}Bytes_run.scr"
             log_banner "$LOG" "$EXP_LABEL" "$COMPRESS_LABEL" "$cache_size" "WARMUP" "$WARMUP_FILE"
             echo "--- Warmup (${cache_size}, 100% read) ---"
@@ -313,11 +385,9 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                 -P commonworkload \
                 -s >> "$LOG" 2>&1
 
-            # Measurement: one run per workload
             for i in "${!WORKLOAD_LABELS[@]}"; do
                 workload="${WORKLOAD_LABELS[$i]}"
                 READ_PCT="${READ_PROPORTIONS[$i]}"
-
                 MEASURE_FILE="${WARMUP_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_${workload}Run${FIELD_LENGTH}Bytes.scr"
                 log_banner "$LOG" "$EXP_LABEL" "$COMPRESS_LABEL" "$cache_size" "$workload" "$MEASURE_FILE"
                 echo "=== ${workload} | ${cache_size} | ${COMPRESS_LABEL} ==="
@@ -337,9 +407,19 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
 
     else
         # ============================================================
-        # HARD RESTART FLOW: per workload — wipe + reload + warmup + measure
-        # Each workload starts from a clean cluster to save disk space.
+        # HARD RESTART FLOW: per workload with snapshot optimisation
+        #
+        # First workload of each dataset:
+        #   hard_restart → YCSB load → stop → take_snapshot → restart(size) → warmup → measure
+        #
+        # All subsequent workloads:
+        #   stop → restore_from_snapshot → restart(size) → warmup → measure
+        #
+        # Snapshot uses hard links → zero extra disk, near-instant restore.
         # ============================================================
+
+        SNAPSHOT_READY=0   # reset for each new dataset
+
         for cache_size in "${CACHE_SIZES[@]}"; do
             echo ""
             echo ">>> Cache: ${cache_size}  Dataset: ${COMPRESS_LABEL}"
@@ -352,32 +432,52 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                 READ_PCT="${READ_PROPORTIONS[$i]}"
 
                 echo ""
-                echo "--- Hard restart for: ${workload} | ${cache_size} | ${COMPRESS_LABEL} ---"
+                echo "--- ${workload} | ${cache_size} | ${COMPRESS_LABEL} ---"
 
-                # Wipe cluster, restart with cache limit, create table
-                hard_restart_cluster
+                if [ "$SNAPSHOT_READY" = "0" ]; then
+                    # ------------------------------------------------
+                    # First workload of this dataset:
+                    # Full setup — load via YCSB, then take snapshot
+                    # ------------------------------------------------
+                    echo "First workload for ${COMPRESS_LABEL}: full load + snapshot"
 
-                # Reload data for this dataset
-                RELOAD_FILE="${WARMUP_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_${workload}_Load.scr"
-                log_banner "$LOG" "$EXP_LABEL" "$COMPRESS_LABEL" "$cache_size" "${workload}_LOAD" "$RELOAD_FILE"
-                echo "--- Loading data for ${workload} ---"
-                $YCSB_DIR load $DB -threads $WTHREADS \
-                    -p recordcount=${RECORD_COUNT} \
-                    -p fieldlength=${FIELD_LENGTH} \
-                    -p valuepool.file=${POOL_FILE} \
-                    -p measurement.raw.output_file="$RELOAD_FILE" \
-                    -P commonworkload \
-                    -s >> "$LOG" 2>&1
-                echo "--- Load done ---"
+                    hard_restart_cluster   # wipe + start (full memory) + create table
 
-                # Soft restart with cache size limit before warmup
-                # This applies the cgroup memory limit and evicts page cache
+                    LOAD_FILE="${BASE_OUT_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
+                    log_banner "$LOG" "$EXP_LABEL" "$COMPRESS_LABEL" "FULL_MEM" "LOAD" "$LOAD_FILE"
+                    echo "--- Loading ${RECORD_COUNT} records x ${FIELD_LENGTH}B ---"
+                    $YCSB_DIR load $DB -threads $WTHREADS \
+                        -p recordcount=${RECORD_COUNT} \
+                        -p fieldlength=${FIELD_LENGTH} \
+                        -p valuepool.file=${POOL_FILE} \
+                        -p measurement.raw.output_file="$LOAD_FILE" \
+                        -P commonworkload \
+                        -s >> "$LOG" 2>&1
+                    echo "--- Load done ---"
+
+                    # Stop Cassandra for consistent snapshot
+                    # (ensures all memtable data is on disk as SSTables)
+                    stop_cluster
+                    take_snapshot
+                    SNAPSHOT_READY=1
+
+                else
+                    # ------------------------------------------------
+                    # Subsequent workloads: instant restore from snapshot
+                    # No YCSB load needed — snapshot has all the data
+                    # ------------------------------------------------
+                    echo "Restoring from snapshot (instant, no reload needed)..."
+                    stop_cluster              # stop Cassandra from previous run
+                    restore_from_snapshot     # rm data + cp -rl snapshot → data
+                fi
+
+                # Apply cache size limit, evict page cache, start Cassandra
                 restart_cluster "$cache_size"
 
                 # Warmup: 100% read — populates OS cache, no disk growth
                 WARMUP_FILE="${WARMUP_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_${workload}_Warmup.scr"
                 log_banner "$LOG" "$EXP_LABEL" "$COMPRESS_LABEL" "$cache_size" "${workload}_WARMUP" "$WARMUP_FILE"
-                echo "--- Warmup for ${workload} ---"
+                echo "--- Warmup (${cache_size}, 100% read) ---"
                 $YCSB_DIR run $DB -threads $THREADS \
                     -p operationcount=$WARMUP_OPS \
                     -p readproportion=1.0 -p updateproportion=0.0 -p insertproportion=0.0 \
@@ -388,7 +488,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                     -P commonworkload \
                     -s >> "$LOG" 2>&1
 
-                # Measure
+                # Measurement
                 MEASURE_FILE="${WARMUP_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_${workload}Run${FIELD_LENGTH}Bytes.scr"
                 log_banner "$LOG" "$EXP_LABEL" "$COMPRESS_LABEL" "$cache_size" "$workload" "$MEASURE_FILE"
                 echo "=== ${workload} | ${cache_size} | ${COMPRESS_LABEL} ==="

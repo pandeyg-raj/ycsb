@@ -82,17 +82,12 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
           CACHE_GB=$(echo ${cache_size} | sed 's/GB//')
           MEM_BYTES=\$((CACHE_GB * 1024 * 1024 * 1024))
         
-          # set memory limit
           echo \$MEM_BYTES | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max
-        
-          # attach THIS shell to cgroup (important)
           echo \$\$ | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs
         
-          # clean OS cache
           vmtouch -e /mydata/cassandra/data/
         
-          # start cassandra (inherits cgroup automatically)
-          nohup /mydata/cassandra/bin/cassandra > cassandra.log 2>&1 &
+          exec nohup /mydata/cassandra/bin/cassandra > cassandra.log 2>&1
         "
 
         # Wait until nodetool works

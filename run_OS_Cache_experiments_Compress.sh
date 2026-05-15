@@ -8,10 +8,12 @@ REPEAT=5
 FIELD_LENGTH=10000
 RECORD_COUNT=10000000
 
-WORKLOAD_LABELS=("read100C" "read95B" "read50A")
-READ_PROPORTIONS=("readproportion=1.0 -p insertproportion=0.0" \
-                  "readproportion=0.95 -p insertproportion=0.05" \
-                  "readproportion=0.5 -p insertproportion=0.5")
+WORKLOAD_LABELS=("workloadC" "workloadB" "workloadA")
+READ_PROPORTIONS=(
+    "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"   # C: read only
+    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"  # B: read mostly
+    "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"  # A: update heavy
+)
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
 
@@ -174,7 +176,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         echo "--- Warmup (${cache_size}) ---"
         $YCSB_DIR run $DB -threads $THREADS \
             -p operationcount=$WARMUP_OPS \
-            -p ${READ_PROPORTIONS[0]} \
+            -p readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0.0 \
             -p recordcount=${RECORD_COUNT} \
             -p measurement.raw.output_file="$WARMUP_FILE" \
             -p cassandra.writeconsistencylevel=QUORUM \
@@ -198,6 +200,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                     -p operationcount=$MEASURE_OPS \
                     -p ${READ_PCT} \
                     -p recordcount=${RECORD_COUNT} \
+                    -p fieldlength=${FIELD_LENGTH} -p valuepool.file=${POOL_FILE} \
                     -p measurement.raw.output_file="$MEASURE_FILE" \
                     -p cassandra.writeconsistencylevel=QUORUM \
                     -p cassandra.readconsistencylevel=QUORUM \

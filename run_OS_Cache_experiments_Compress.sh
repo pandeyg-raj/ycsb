@@ -1,21 +1,9 @@
 #!/bin/bash
-
-# === Pre-flight check ===
-echo "Checking binaries..."
-for bin in create_table_ec_compr_on create_table_ec_compr_off \
-           create_table_rep_compr_on create_table_rep_compr_off; do
-    if [ ! -x "/mydata/${bin}" ]; then
-        echo "ERROR: /mydata/${bin} missing or not executable. Aborting."
-        exit 1
-    fi
-done
-echo "All binaries OK."
-
 # === Config ===
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-MEASURE_OPS=10000000
-WARMUP_OPS=500000
+MEASURE_OPS=5000000
+WARMUP_OPS=5000000
 FIELD_LENGTH=10000
 RECORD_COUNT=10000000
 
@@ -136,24 +124,21 @@ restart_cluster() {
 }
 
 # =====================================================================
-# hard_restart_cluster <cache_size>
-#   Wipes ALL data on every node, restarts under cgroup memory limit,
+# hard_restart_cluster
+#   Wipes ALL data on every node, restarts with FULL memory (no cgroup limit)
 #   then creates the YCSB table using the pre-selected binary.
 #   Does NOT load data — caller is responsible for loading after.
+#   Full memory allows faster loading. Caller should call restart_cluster(cache_size)
+#   after loading to apply the cgroup limit before warmup.
 #
 #   Uses CREATE_TABLE_BIN set at startup based on EC/REP + compression.
-#   No vmtouch needed — data was deleted so nothing to evict.
 # =====================================================================
 hard_restart_cluster() {
-    local cache_size=$1
     local nodes
     if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
 
-    local cache_gb="${cache_size//GB/}"
-    local mem_bytes=$((cache_gb * 1024 * 1024 * 1024))
-
     echo ""
-    echo "=== HARD restart: wipe + restart nodes ${nodes[*]}, cache=${cache_size} ==="
+    echo "=== HARD restart: wipe + restart nodes ${nodes[*]} with FULL memory ==="
 
     for node in "${nodes[@]}"; do
         local ip="10.10.1.$node"
@@ -186,13 +171,10 @@ hard_restart_cluster() {
         ssh ${SSH_USER}@${ip} "rm -rf ${CASS_DIR}/data/"
         echo "  [2/4] Data wiped"
 
-        # [3/4] Set cgroup + start (no vmtouch — nothing to evict after wipe)
-        echo "  [3/4] Setting ${cache_size} limit and starting Cassandra..."
-        ssh ${SSH_USER}@${ip} \
-            "cd ${CASS_DIR} && \
-             echo ${mem_bytes} | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max && \
-             echo \$\$ | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs && \
-             bin/cassandra > /dev/null 2>&1"
+        # [3/4] Start with full memory — no cgroup limit, fast for loading
+        # restart_cluster(cache_size) will apply the limit after loading is done
+        echo "  [3/4] Starting Cassandra (full memory, no cgroup limit)..."
+        ssh ${SSH_USER}@${ip}             "cd ${CASS_DIR} && bin/cassandra > /dev/null 2>&1"
 
         # [4/4] Wait for UN
         echo "  [4/4] Waiting for ${ip} to be UN..."
@@ -218,7 +200,7 @@ hard_restart_cluster() {
     echo "  [5] Table created"
 
     echo ""
-    echo "=== HARD restart complete. Cluster wiped and ready with ${cache_size} cache. ==="
+    echo "=== HARD restart complete. Cluster wiped, running at full memory. ==="
     echo "=== Remember to load data before running workloads. ==="
 }
 
@@ -372,7 +354,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                 echo "--- Hard restart for: ${workload} | ${cache_size} | ${COMPRESS_LABEL} ---"
 
                 # Wipe cluster, restart with cache limit, create table
-                hard_restart_cluster "$cache_size"
+                hard_restart_cluster
 
                 # Reload data for this dataset
                 RELOAD_FILE="${WARMUP_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_${workload}_Load.scr"
@@ -386,6 +368,10 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                     -P commonworkload \
                     -s >> "$LOG" 2>&1
                 echo "--- Load done ---"
+
+                # Soft restart with cache size limit before warmup
+                # This applies the cgroup memory limit and evicts page cache
+                restart_cluster "$cache_size"
 
                 # Warmup: 100% read — populates OS cache, no disk growth
                 WARMUP_FILE="${WARMUP_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_${cache_size}_${workload}_Warmup.scr"

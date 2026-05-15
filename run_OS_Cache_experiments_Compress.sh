@@ -33,16 +33,6 @@ read THREADS
 # === Outermost loop: compression datasets ===
 for compress_idx in "${!COMPRESS_LABELS[@]}"; do
   COMPRESS_LABEL="${COMPRESS_LABELS[$compress_idx]}"
-
-  # JPEG gets reduced settings; others keep defaults
-  if [ "$COMPRESS_LABEL" = "jpeg" ]; then
-    RECORD_COUNT=8000000    # 20% less than default 10M
-    REPEAT=4                # one fewer iteration
-  else
-    RECORD_COUNT=10000000
-    REPEAT=5
-  fi
-
   POOL_FILE="${POOL_DIR}/${POOL_FILES[$compress_idx]}"
 
   echo

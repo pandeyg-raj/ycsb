@@ -10,8 +10,7 @@ RECORD_COUNT=10000000         # was 100000000; 10M * 10KB == 100GB target
 
 # Workloads definition
 WORKLOAD_LABELS=("read100" "read95" "read50")
-READ_PROPORTIONS=("readproportion=1 -p insertproportion=0" \
-                  "readproportion=0.95 -p insertproportion=0.05" \
+READ_PROPORTIONS=("readproportion=0.9 -p insertproportion=0.1" \
                   "readproportion=0.5 -p insertproportion=0.5")
 
 # OS cache sizes (in GB)
@@ -69,7 +68,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     echo "--- Warm-up phase (${cache_size}) ---"
     $YCSB_DIR run $DB -threads $THREADS \
       -p operationcount=$WARMUP_OPS \
-      -p ${READ_PROPORTIONS[2]} \
+      -p ${READ_PROPORTIONS[1]} \
       -p recordcount=${RECORD_COUNT} \
       -p fieldlength=${FIELD_LENGTH} \
       -p valuepool.file=${POOL_FILE} \

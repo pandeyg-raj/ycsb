@@ -6,7 +6,6 @@ MEASURE_OPS=5000000
 WARMUP_OPS=5000000
 REPEAT=5
 FIELD_LENGTH=10000            # was 1000; pool cells are 10240 bytes
-FIELD_COUNT=1                 # one pool line == one cell value
 RECORD_COUNT=10000000         # was 100000000; 10M * 10KB == 100GB target
 
 # Workloads definition
@@ -62,7 +61,6 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
   $YCSB_DIR load $DB -threads $WTHREADS \
     -p recordcount=${RECORD_COUNT} \
     -p fieldlength=${FIELD_LENGTH} \
-    -p fieldcount=${FIELD_COUNT} \
     -p valuepool.file=${POOL_FILE} \
     -p measurement.raw.output_file="$LOAD_FILE" \
     -P commonworkload \
@@ -84,7 +82,6 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
       -p ${READ_PROPORTIONS[2]} \
       -p recordcount=${RECORD_COUNT} \
       -p fieldlength=${FIELD_LENGTH} \
-      -p fieldcount=${FIELD_COUNT} \
       -p valuepool.file=${POOL_FILE} \
       -p measurement.raw.output_file="$WARMUP_FILE" \
       -p cassandra.writeconsistencylevel=QUORUM \
@@ -108,7 +105,6 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
           -p ${READ_PCT} \
           -p recordcount=${RECORD_COUNT} \
           -p fieldlength=${FIELD_LENGTH} \
-          -p fieldcount=${FIELD_COUNT} \
           -p valuepool.file=${POOL_FILE} \
           -p measurement.raw.output_file="$MEASURE_FILE" \
           -p cassandra.writeconsistencylevel=QUORUM \

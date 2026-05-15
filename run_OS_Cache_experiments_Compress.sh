@@ -29,16 +29,13 @@ CASS_DIR=/mydata/cassandra
 restart_cluster() {
     local cache_size=$1
 
-    # Use the node count confirmed by user at startup.
-    # Seeds (2,3) always first so cluster stays healthy throughout.
     local nodes
     if [ "$NUM_NODES" = "3" ]; then
-        nodes=(2 3 4)        # REP: Cassandra RF=3
+        nodes=(2 3 4)
     else
-        nodes=(2 3 4 5 6)    # EC:  LEAST RS(5,3)
+        nodes=(2 3 4 5 6)
     fi
 
-    # Compute memory bytes locally once
     local cache_gb="${cache_size//GB/}"
     local mem_bytes=$((cache_gb * 1024 * 1024 * 1024))
 
@@ -50,61 +47,56 @@ restart_cluster() {
         echo ""
         echo "--- $ip ---"
 
-        # ---- [1/4] Graceful stop ------------------------------------------
-        echo "  [1/4] Stopping Cassandra..."
+        # [1/3] Kill — your tested command
+        echo "  [1/3] Stopping Cassandra..."
         ssh ${SSH_USER}@${ip} \
-            "${CASS_DIR}/bin/nodetool stopdaemon 2>/dev/null || true"
+            "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true"
 
-        # stopdaemon is authoritative — if it said "Cassandra has shutdown", it's done.
-        # Sleep gives the JVM a moment to fully release file handles and ports.
-        sleep 10
-        
-        # Safety kill for anything still lingering (shouldn't be needed but harmless)
-        ssh ${SSH_USER}@${ip} \
-            "pgrep -f 'org.apache.cassandra' | xargs -r kill -9 2>/dev/null; true"
-        
-        sleep 10
-        echo "  [1/4] Stopped"
-
-        # ---- [2/4] Set cgroup limit ----------------------------------------
-        # ---- [3/4] Evict page cache ----------------------------------------
-        # ---- [4/4] Start Cassandra -----------------------------------------
-        # All in ONE SSH call so the shell that joins the cgroup is the
-        # same parent that spawns Cassandra → cgroup inheritance works.
-        #
-        # Verified individually:
-        #   - sudo tee memory.max     : passwordless, prints bytes correctly
-        #   - echo \$\$ | tee cgroup.procs : remote shell PID, Cassandra inherits
-        #   - vmtouch -e              : 311 pages evicted in test
-        #   - bin/cassandra           : daemonizes, JVM lands in cgroup.procs
-        #
-        # ${mem_bytes} expands locally (correct — we want the number on remote)
-        # \$\$ expands on the remote shell (correct — remote shell's own PID)
-        echo "  [2/4] Setting cgroup to ${mem_bytes} bytes..."
-        echo "  [3/4] Evicting page cache..."
-        echo "  [4/4] Starting Cassandra..."
-        ssh ${SSH_USER}@${ip} bash << ENDSSH
-echo ${mem_bytes} | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max > /dev/null
-echo \$\$ | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs > /dev/null
-vmtouch -e ${CASS_DIR}/data/ > /dev/null 2>&1 || true
-${CASS_DIR}/bin/cassandra > /dev/null 2>&1
-ENDSSH
-
-        # Wait for this specific node to show UN
-        echo "  Waiting for ${ip} to be UN..."
-        local attempts=0
-        until ssh ${SSH_USER}@${ip} \
-            "${CASS_DIR}/bin/nodetool status 2>/dev/null \
-             | grep '${ip}' | grep -q 'UN'"; do
+        # Wait for death — exit 0 = still running, exit 1 = stopped
+        # Verified: ps -a | grep java returns 0 when running, 1 when stopped
+        local kill_attempts=0
+        while ssh ${SSH_USER}@${ip} "ps -a | grep java > /dev/null 2>&1"; do
             sleep 10
-            attempts=$((attempts + 1))
-            if [ "$attempts" -ge 30 ]; then
+            kill_attempts=$((kill_attempts + 1))
+            echo "  Waiting for Cassandra to stop... (${kill_attempts})"
+            if [ "$kill_attempts" -ge 6 ]; then
+                echo "  Still running after 1 min — force killing..."
+                ssh ${SSH_USER}@${ip} \
+                    "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill -9 2>/dev/null; true"
+                sleep 5
+                break
+            fi
+        done
+        echo "  [1/3] Stopped"
+
+        # [2/3] Set cgroup + evict + start — your tested command
+        # cd sets working dir so bin/cassandra and data/ resolve correctly
+        # \$\$ → remote shell PID → Cassandra child inherits cgroup
+        # ${mem_bytes} → already a number, expands locally → correct on remote
+        echo "  [2/3] Setting ${cache_size} limit, evicting cache, starting Cassandra..."
+        ssh ${SSH_USER}@${ip} \
+            "cd ${CASS_DIR} && \
+             echo ${mem_bytes} | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max && \
+             echo \$\$ | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs && \
+             vmtouch -e data/ > /dev/null 2>&1 && \
+             bin/cassandra > /dev/null 2>&1"
+
+        # [3/3] Wait for this node to be UN
+        # Verified: nodetool status | grep IP | grep -q UN returns 0 when UN
+        echo "  [3/3] Waiting for ${ip} to be UN..."
+        local start_attempts=0
+        until ssh ${SSH_USER}@${ip} \
+            "${CASS_DIR}/bin/nodetool status 2>/dev/null | grep '${ip}' | grep -q 'UN'"; do
+            sleep 10
+            start_attempts=$((start_attempts + 1))
+            echo "  Waiting for UN... (${start_attempts})"
+            if [ "$start_attempts" -ge 30 ]; then
                 echo "  ERROR: ${ip} did not become UN within 5 minutes."
                 echo "  Check ${CASS_DIR}/logs/system.log on ${ip}."
                 exit 1
             fi
         done
-        echo "  ${ip} is UP and NORMAL (UN)"
+        echo "  [3/3] ${ip} is UP and NORMAL (UN)"
     done
 
     echo ""

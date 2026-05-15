@@ -1,4 +1,16 @@
 #!/bin/bash
+
+# === Pre-flight check ===
+echo "Checking binaries..."
+for bin in create_table_ec_compr_on create_table_ec_compr_off \
+           create_table_rep_compr_on create_table_rep_compr_off; do
+    if [ ! -x "/mydata/${bin}" ]; then
+        echo "ERROR: /mydata/${bin} missing or not executable. Aborting."
+        exit 1
+    fi
+done
+echo "All binaries OK."
+
 # === Config ===
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql

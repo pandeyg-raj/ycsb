@@ -75,26 +75,29 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         done
         echo "Cassandra stopped on 10.10.1.$node"
         
-        # Start Cassandra with target memory limit
-        #strip GB from cache size
-        CACHE_GB=$(echo ${cache_size} | sed 's/GB//')
-        MEM_BYTES=$((CACHE_GB * 1024 * 1024 * 1024))
-        CASS_PID=""
-        CASS_PID=$(ssh rzp5412@10.10.1.$node "pgrep -f CassandraDaemon | head -n 1")
-        if [[ -z "$CASS_PID" ]]; then
-          echo "ERROR: Cassandra PID not found on 10.10.1.$node"
-          exit 1
-        fi
-        
+         # Start Cassandra with target memory limit
+                 
         ssh rzp5412@10.10.1.$node "
-        echo $MEM_BYTES | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max
-        echo $CASS_PID | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs
-        vmtouch -e /mydata/cassandra/data/
-        nohup /mydata/cassandra/bin/cassandra > cassandra.log 2>&1 &
+          #strip GB from cache size
+          CACHE_GB=$(echo ${cache_size} | sed 's/GB//')
+          MEM_BYTES=\$((CACHE_GB * 1024 * 1024 * 1024))
+        
+          # set memory limit
+          echo \$MEM_BYTES | sudo tee /sys/fs/cgroup/mylimitedgroup/memory.max
+        
+          # attach THIS shell to cgroup (important)
+          echo \$\$ | sudo tee /sys/fs/cgroup/mylimitedgroup/cgroup.procs
+        
+          # clean OS cache
+          vmtouch -e /mydata/cassandra/data/
+        
+          # start cassandra (inherits cgroup automatically)
+          nohup /mydata/cassandra/bin/cassandra > cassandra.log 2>&1 &
         "
+
         # Wait until nodetool works
         echo "Waiting for Cassandra startup on 10.10.1.$node ..."
-        until ssh rzp5412@10.10.1.$node "/mydata/cassandra/bin/nodetool status > /dev/null 2>&1"; do
+        until ssh rzp5412@10.10.1.$node "/mydata/cassandra/bin/nodetool status | grep -q 'UN'"; do
           sleep 5
         done
       

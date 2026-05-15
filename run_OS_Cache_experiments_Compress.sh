@@ -2,8 +2,8 @@
 # === Config ===
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-MEASURE_OPS=5000000
-WARMUP_OPS=5000000
+MEASURE_OPS=10000000
+WARMUP_OPS=500000
 FIELD_LENGTH=10000
 RECORD_COUNT=10000000
 
@@ -11,9 +11,9 @@ RECORD_COUNT=10000000
 # updateproportion → writes go to existing keys → disk stays flat, correct cache behavior
 WORKLOAD_LABELS=("workloadC" "workloadB" "workloadA" "workloadD")
 READ_PROPORTIONS=(
-    "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"                          # C: read only
-    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                          # B: read mostly
-    "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"                          # A: update heavy
+    "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"   # C: read only
+    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"  # B: read mostly
+    "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"  # A: update heavy
     "readproportion=0.95 -p updateproportion=0.0  -p insertproportion=0.05 -p requestdistrib=latest"  # D: read latest
 )
 
@@ -32,7 +32,7 @@ CASS_DIR=/mydata/cassandra
 #                run all workloads on the same data
 #   1 → Hard:    before each workload, wipe cluster + reload +
 #                warmup (saves disk space, each workload starts fresh)
-HARD_RESTART_PER_WORKLOAD=0
+HARD_RESTART_PER_WORKLOAD=1
 # ---------------------------------------------------------------
 
 # =====================================================================

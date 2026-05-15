@@ -8,8 +8,9 @@ REPEAT=5
 FIELD_LENGTH=10000
 RECORD_COUNT=10000000
 
-WORKLOAD_LABELS=("read90" "read50")
-READ_PROPORTIONS=("readproportion=0.9 -p insertproportion=0.1" \
+WORKLOAD_LABELS=("read100C" "read95B" "read50A")
+READ_PROPORTIONS=("readproportion=1.0 -p insertproportion=0.0" \
+                  "readproportion=0.95 -p insertproportion=0.05" \
                   "readproportion=0.5 -p insertproportion=0.5")
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
@@ -173,7 +174,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         echo "--- Warmup (${cache_size}) ---"
         $YCSB_DIR run $DB -threads $THREADS \
             -p operationcount=$WARMUP_OPS \
-            -p ${READ_PROPORTIONS[1]} \
+            -p ${READ_PROPORTIONS[0]} \
             -p recordcount=${RECORD_COUNT} \
             -p measurement.raw.output_file="$WARMUP_FILE" \
             -p cassandra.writeconsistencylevel=QUORUM \

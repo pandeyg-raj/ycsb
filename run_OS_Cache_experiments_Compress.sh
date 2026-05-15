@@ -197,6 +197,7 @@ hard_restart_cluster() {
     echo ""
     echo "  [5] Creating YCSB table via /mydata/${CREATE_TABLE_BIN} ..."
     /mydata/${CREATE_TABLE_BIN}
+    sleep 10
     echo "  [5] Table created"
 
     echo ""

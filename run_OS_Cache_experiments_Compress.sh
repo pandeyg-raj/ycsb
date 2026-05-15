@@ -83,7 +83,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         "
         # Wait until nodetool works
         echo "Waiting for Cassandra startup on 10.10.1.$node ..."
-        until rzp5412@10.10.1.$node "/mydata/cassandra/bin/nodetool status > /dev/null 2>&1"; do
+        until ssh rzp5412@10.10.1.$node "/mydata/cassandra/bin/nodetool status > /dev/null 2>&1"; do
           sleep 5
         done
       

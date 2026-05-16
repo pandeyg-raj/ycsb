@@ -455,6 +455,13 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                         -s >> "$LOG" 2>&1
                     echo "--- Load done ---"
 
+                    echo "--- Draining all nodes (flushing memtables) ---"
+                    if [ "$NUM_NODES" = "3" ]; then snap_nodes=(2 3 4); else snap_nodes=(2 3 4 5 6); fi
+                    for node in "${snap_nodes[@]}"; do
+                        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool drain" &
+                    done
+                    wait
+                    echo "--- Drain complete ---"
                     # Stop Cassandra for consistent snapshot
                     # (ensures all memtable data is on disk as SSTables)
                     stop_cluster

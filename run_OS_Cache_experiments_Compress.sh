@@ -5,7 +5,7 @@ DB=cassandra-cql
 MEASURE_OPS=10000000
 WARMUP_OPS=3000000
 FIELD_LENGTH=10000
-RECORD_COUNT=6500000
+RECORD_COUNT=7000000
 
 # Standard YCSB workloads A, B, C, D — worst case (A) first for early failure detection
 WORKLOAD_LABELS=("workloadA" "workloadD" "workloadB" "workloadC")
@@ -307,7 +307,7 @@ echo "Is this EC or REP?"
 read EXP_LABEL
 
 if echo "$EXP_LABEL" | grep -qi "rep"; then
-    EXPECTED_NODES=3
+    EXPECTED_NODES=5
 else
     EXPECTED_NODES=5
 fi

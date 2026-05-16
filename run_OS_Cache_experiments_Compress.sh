@@ -131,6 +131,26 @@ restore_from_snapshot() {
 }
 
 # =====================================================================
+# delete_snapshot
+#   Removes data_snapshot/ on all nodes after a dataset is fully done.
+#   Frees the disk space held by the snapshot before loading next dataset.
+#   Call after all cache_sizes x workloads for a dataset complete.
+# =====================================================================
+delete_snapshot() {
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+
+    echo ""
+    echo "=== Deleting snapshot on all nodes (freeing disk space) ==="
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        ssh ${SSH_USER}@${ip} "rm -rf ${CASS_DIR}/data_snapshot/"
+        echo "  Snapshot deleted on ${ip}"
+    done
+    echo "=== Snapshot deleted ==="
+}
+
+# =====================================================================
 # restart_cluster <cache_size>
 #   Rolling restart — one node at a time, seeds first.
 #   Evicts page cache and starts Cassandra under cgroup memory limit.
@@ -410,12 +430,14 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         # HARD RESTART FLOW: per workload with snapshot optimisation
         #
         # First workload of each dataset:
-        #   hard_restart → YCSB load → stop → take_snapshot → restart(size) → warmup → measure
+        #   hard_restart → YCSB load → wait compaction → drain →
+        #   stop → take_snapshot → restart(size) → warmup → measure
         #
         # All subsequent workloads:
         #   stop → restore_from_snapshot → restart(size) → warmup → measure
         #
         # Snapshot uses hard links → zero extra disk, near-instant restore.
+        # After all workloads for dataset complete: delete_snapshot.
         # ============================================================
 
         SNAPSHOT_READY=0   # reset for each new dataset
@@ -454,6 +476,9 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                         -P commonworkload \
                         -s >> "$LOG" 2>&1
                     echo "--- Load done ---"
+
+                    # Wait for compaction to settle before snapshot
+                    # Ensures minimal SSTables → no compaction storm after restore
                     echo "--- Waiting for compaction to settle on all nodes ---"
                     if [ "$NUM_NODES" = "3" ]; then snap_nodes=(2 3 4); else snap_nodes=(2 3 4 5 6); fi
                     for node in "${snap_nodes[@]}"; do
@@ -467,6 +492,8 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                         echo "  ${ip} compaction settled"
                     done
                     echo "--- Compaction settled on all nodes ---"
+
+                    # Drain all nodes in parallel — flush memtable, close commitlog
                     echo "--- Draining all nodes (flushing memtables) ---"
                     if [ "$NUM_NODES" = "3" ]; then snap_nodes=(2 3 4); else snap_nodes=(2 3 4 5 6); fi
                     for node in "${snap_nodes[@]}"; do
@@ -474,8 +501,8 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                     done
                     wait
                     echo "--- Drain complete ---"
-                    # Stop Cassandra for consistent snapshot
-                    # (ensures all memtable data is on disk as SSTables)
+
+                    # Stop Cassandra, then snapshot
                     stop_cluster
                     take_snapshot
                     SNAPSHOT_READY=1
@@ -524,6 +551,12 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                 echo "=== Done: ${workload} | ${cache_size} | ${COMPRESS_LABEL} ==="
             done
         done
+    fi
+
+    # Delete snapshot after all runs for this dataset complete.
+    # Frees disk before next dataset loads its own data.
+    if [ "$HARD_RESTART_PER_WORKLOAD" = "1" ] && [ "$SNAPSHOT_READY" = "1" ]; then
+        delete_snapshot
     fi
 
     echo ">>> Completed all runs for ${COMPRESS_LABEL}"

@@ -3,9 +3,9 @@
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
 MEASURE_OPS=10000000
-WARMUP_OPS=1000000
+WARMUP_OPS=3000000
 FIELD_LENGTH=10000
-RECORD_COUNT=9000000
+RECORD_COUNT=8500000
 
 # Standard YCSB workloads A, B, C, D — worst case (A) first for early failure detection
 WORKLOAD_LABELS=("workloadA" "workloadD" "workloadB" "workloadC")

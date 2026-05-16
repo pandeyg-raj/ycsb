@@ -19,8 +19,11 @@ READ_PROPORTIONS=(
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
 
 POOL_DIR=/mydata/compressData
-COMPRESS_LABELS=("jpeg" "wiki" "hdfs")
-POOL_FILES=("values_pool_jpeg.txt" "values_pool_wiki.txt" "values_pool_hdfs.txt")
+# jpeg done — uncomment when running compression=off or EC
+# COMPRESS_LABELS=("jpeg" "wiki" "hdfs")
+# POOL_FILES=("values_pool_jpeg.txt" "values_pool_wiki.txt" "values_pool_hdfs.txt")
+COMPRESS_LABELS=("wiki" "hdfs")
+POOL_FILES=("values_pool_wiki.txt" "values_pool_hdfs.txt")
 
 SSH_USER=rzp5412
 CASS_DIR=/mydata/cassandra
@@ -221,70 +224,83 @@ restart_cluster() {
 # hard_restart_cluster
 #   Wipes ALL data on every node, restarts with FULL memory (no cgroup),
 #   then creates the YCSB table using the pre-selected binary.
-#   Full memory allows faster loading.
-#   Caller must: load data → stop_cluster → take_snapshot (first time)
-#             or: restore_from_snapshot (subsequent times)
-#   Then call restart_cluster(cache_size) to apply cgroup limit.
+#
+#   FIX: kill ALL nodes first, wipe ALL nodes, then start sequentially.
+#   Prevents "already exists" UUID gossip collision that occurs when a
+#   running node with old UUID sees a restarted node with new UUID.
 # =====================================================================
 hard_restart_cluster() {
     local nodes
     if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
 
     echo ""
-    echo "=== HARD restart: wipe + restart nodes ${nodes[*]} with FULL memory ==="
+    echo "=== HARD restart: nodes ${nodes[*]} ==="
 
+    # ── Phase 1: Kill ALL nodes in parallel ──────────────────────────
+    # All must be killed BEFORE any node is wiped+restarted.
+    # A running node with old UUID causes gossip collision on the
+    # freshly-wiped node that gets a new UUID → "already exists" error.
+    echo "  [1/3] Killing all nodes in parallel..."
+    for node in "${nodes[@]}"; do
+        ssh ${SSH_USER}@10.10.1.${node} \
+            "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true" &
+    done
+    wait
+
+    # Wait for all to fully stop
     for node in "${nodes[@]}"; do
         local ip="10.10.1.$node"
-        echo ""
-        echo "--- $ip ---"
-
-        echo "  [1/4] Stopping Cassandra..."
-        ssh ${SSH_USER}@${ip} \
-            "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true"
-
-        local kill_attempts=0
+        local attempts=0
         while ssh ${SSH_USER}@${ip} \
             "ps -ef | grep '[j]ava' | grep -i 'cassandra' > /dev/null 2>&1"; do
             sleep 10
-            kill_attempts=$((kill_attempts + 1))
-            echo "  Waiting for stop... (${kill_attempts}/6)"
-            if [ "$kill_attempts" -ge 6 ]; then
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 6 ]; then
                 ssh ${SSH_USER}@${ip} \
                     "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill -9 2>/dev/null; true"
                 sleep 5; break
             fi
         done
-        echo "  [1/4] Stopped"
+        echo "    ${ip} stopped"
+    done
 
-        echo "  [2/4] Wiping data on ${ip}..."
-        ssh ${SSH_USER}@${ip} "rm -rf ${CASS_DIR}/data/"
-        echo "  [2/4] Data wiped"
+    # ── Phase 2: Wipe ALL nodes in parallel ──────────────────────────
+    echo "  [2/3] Wiping data on all nodes in parallel..."
+    for node in "${nodes[@]}"; do
+        ssh ${SSH_USER}@10.10.1.${node} "rm -rf ${CASS_DIR}/data/" &
+    done
+    wait
+    echo "  [2/3] All nodes stopped and wiped"
 
-        echo "  [3/4] Starting Cassandra (full memory, no cgroup limit)..."
+    # ── Phase 3: Start nodes sequentially, seeds (2,3) first ─────────
+    # Sequential start ensures each node fully joins (UN) before the
+    # next starts, preventing gossip race conditions.
+    echo "  [3/3] Starting nodes sequentially (seeds first)..."
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        echo "    Starting ${ip}..."
         ssh ${SSH_USER}@${ip} \
             "cd ${CASS_DIR} && bin/cassandra > /dev/null 2>&1"
 
-        echo "  [4/4] Waiting for ${ip} to be UN..."
         local start_attempts=0
         until ssh ${SSH_USER}@${ip} \
             "${CASS_DIR}/bin/nodetool status 2>/dev/null | grep '${ip}' | grep -q 'UN'"; do
             sleep 10
             start_attempts=$((start_attempts + 1))
-            echo "  Waiting for UN... (${start_attempts}/30)"
+            echo "    Waiting for ${ip} UN... (${start_attempts}/30)"
             if [ "$start_attempts" -ge 30 ]; then
-                echo "  ERROR: ${ip} not UN after 5 min. Check ${CASS_DIR}/logs/system.log"
+                echo "    ERROR: ${ip} not UN after 5 min. Check ${CASS_DIR}/logs/system.log"
                 exit 1
             fi
         done
-        echo "  [4/4] ${ip} is UP and NORMAL (UN)"
+        echo "    ${ip} is UN"
     done
 
     echo "  Creating YCSB table via /mydata/${CREATE_TABLE_BIN} ..."
     /mydata/${CREATE_TABLE_BIN}
     echo "  Table created"
-
     echo ""
-    echo "=== HARD restart complete. Cluster wiped, running at full memory. ==="
+    echo "=== HARD restart complete. Cluster wiped and ready at full memory. ==="
 }
 
 # =====================================================================
@@ -463,7 +479,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                     # ------------------------------------------------
                     echo "First workload for ${COMPRESS_LABEL}: full load + snapshot"
 
-                    hard_restart_cluster   # wipe + start (full memory) + create table
+                    hard_restart_cluster   # kill all + wipe all + start sequentially + create table
 
                     LOAD_FILE="${BASE_OUT_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_Load${FIELD_LENGTH}Bytes_run.scr"
                     log_banner "$LOG" "$EXP_LABEL" "$COMPRESS_LABEL" "FULL_MEM" "LOAD" "$LOAD_FILE"

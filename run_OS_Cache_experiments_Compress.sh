@@ -3,9 +3,9 @@
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
 MEASURE_OPS=10000000
-WARMUP_OPS=5000000
+WARMUP_OPS=1000000
 FIELD_LENGTH=10000
-RECORD_COUNT=10000000
+RECORD_COUNT=9000000
 
 # Standard YCSB workloads A, B, C, D — worst case (A) first for early failure detection
 WORKLOAD_LABELS=("workloadA" "workloadD" "workloadB" "workloadC")
@@ -454,7 +454,19 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                         -P commonworkload \
                         -s >> "$LOG" 2>&1
                     echo "--- Load done ---"
-
+                    echo "--- Waiting for compaction to settle on all nodes ---"
+                    if [ "$NUM_NODES" = "3" ]; then snap_nodes=(2 3 4); else snap_nodes=(2 3 4 5 6); fi
+                    for node in "${snap_nodes[@]}"; do
+                        ip="10.10.1.$node"
+                        echo "  Waiting on ${ip}..."
+                        while ssh ${SSH_USER}@${ip} \
+                            "${CASS_DIR}/bin/nodetool compactionstats 2>/dev/null | grep -q 'pending tasks: [^0]'"; do
+                            sleep 30
+                            echo "  Compaction still running on ${ip}..."
+                        done
+                        echo "  ${ip} compaction settled"
+                    done
+                    echo "--- Compaction settled on all nodes ---"
                     echo "--- Draining all nodes (flushing memtables) ---"
                     if [ "$NUM_NODES" = "3" ]; then snap_nodes=(2 3 4); else snap_nodes=(2 3 4 5 6); fi
                     for node in "${snap_nodes[@]}"; do

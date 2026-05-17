@@ -19,11 +19,9 @@ READ_PROPORTIONS=(
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
 
 POOL_DIR=/mydata/compressData
-# jpeg done — uncomment when running compression=off or EC
-# COMPRESS_LABELS=("jpeg" "wiki" "hdfs")
-# POOL_FILES=("values_pool_jpeg.txt" "values_pool_wiki.txt" "values_pool_hdfs.txt")
-COMPRESS_LABELS=("wiki" "hdfs")
-POOL_FILES=("values_pool_wiki.txt" "values_pool_hdfs.txt")
+
+COMPRESS_LABELS=("jpeg" "wiki" "hdfs")
+POOL_FILES=("values_pool_jpeg.txt" "values_pool_wiki.txt" "values_pool_hdfs.txt")
 
 SSH_USER=rzp5412
 CASS_DIR=/mydata/cassandra

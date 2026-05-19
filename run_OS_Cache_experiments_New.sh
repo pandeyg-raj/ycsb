@@ -10,11 +10,9 @@ WARMUP_OPS=3000000
 TOTAL_DB_BYTES=70000000000
 
 # Standard YCSB workloads A, B, C, D — worst case (A) first for early failure detection
-WORKLOAD_LABELS=("workloadA" "workloadD" "workloadB" "workloadC")
+WORKLOAD_LABELS=("workloadA" "workloadC")
 READ_PROPORTIONS=(
     "readproportion=0.5  -p updateproportion=0.5  -p insertproportion=0"                           # A: 50% update (worst case)
-    "readproportion=0.95 -p updateproportion=0.0  -p insertproportion=0.05 -p requestdistrib=latest" # D: read latest
-    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                           # B: read mostly
     "readproportion=1.0  -p updateproportion=0.0  -p insertproportion=0"                           # C: read only
 )
 

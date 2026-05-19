@@ -42,8 +42,7 @@ READ_PROPORTIONS=(
     "scanproportion=0.95 -p insertproportion=0.05 -p readproportion=0 -p updateproportion=0 -p requestdistribution=uniform -p minscanlength=${MIN_SCAN_LENGTH} -p maxscanlength=${MAX_SCAN_LENGTH}"
 )
 
-#CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
-CACHE_SIZES=("64GB")
+CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
 
 POOL_DIR=/mydata/compressData
 COMPRESS_LABELS=("jpeg" "wiki" "hdfs")
@@ -404,13 +403,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
             echo "=== workloadE | ${cache_size} | ${COMPRESS_LABEL} ==="
             $YCSB_DIR run $DB -threads $SCAN_THREADS \
                 -p operationcount=$MEASURE_OPS \
-                -p scanproportion=0.95 \
-                -p insertproportion=0.05 \
-                -p readproportion=0 \
-                -p updateproportion=0 \
-                -p requestdistribution=uniform \
-                -p minscanlength=${MIN_SCAN_LENGTH} \
-                -p maxscanlength=${MAX_SCAN_LENGTH} \
+                -p ${READ_PCT} \
                 -p recordcount=${RECORD_COUNT} \
                 ${POOL_PARAMS} \
                 -p measurement.raw.output_file="$MEASURE_FILE" \
@@ -516,13 +509,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                 echo "=== ${workload} | ${cache_size} | ${COMPRESS_LABEL} ==="
                 $YCSB_DIR run $DB -threads $SCAN_THREADS \
                     -p operationcount=$MEASURE_OPS \
-                    -p scanproportion=0.95 \
-                    -p insertproportion=0.05 \
-                    -p readproportion=0 \
-                    -p updateproportion=0 \
-                    -p requestdistribution=uniform \
-                    -p minscanlength=${MIN_SCAN_LENGTH} \
-                    -p maxscanlength=${MAX_SCAN_LENGTH} \
+                    -p ${READ_PCT} \
                     -p recordcount=${RECORD_COUNT} \
                     ${POOL_PARAMS} \
                     -p measurement.raw.output_file="$MEASURE_FILE" \

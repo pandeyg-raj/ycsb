@@ -15,7 +15,7 @@ DB=cassandra-cql
 MEASURE_OPS=10000000
 WARMUP_OPS=3000000
 
-# Total target database size (~70 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH
+# Total target database size (~100 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH
 TOTAL_DB_BYTES=100000000000
 
 # Workloads — C (100% read) first to keep cache stable, then A (50/50)

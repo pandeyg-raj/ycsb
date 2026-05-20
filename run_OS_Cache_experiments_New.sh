@@ -16,7 +16,7 @@ MEASURE_OPS=10000000
 WARMUP_OPS=3000000
 
 # Total target database size (~70 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH
-TOTAL_DB_BYTES=70000000000
+TOTAL_DB_BYTES=100000000000
 
 # Workloads — C (100% read) first to keep cache stable, then A (50/50)
 WORKLOAD_LABELS=("workloadC" "workloadA")
@@ -28,7 +28,7 @@ READ_PROPORTIONS=(
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
 
 # Object sizes — biggest first so disk/compaction issues surface early
-OBJECT_SIZE_LABELS=("50KB" "10KB" "1KB")
+OBJECT_SIZE_LABELS=("100KB" "10KB" "1KB")
 FIELD_LENGTHS=(50000 10000 1000)
 
 SSH_USER=rzp5412

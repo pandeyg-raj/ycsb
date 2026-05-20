@@ -13,10 +13,10 @@
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
 MEASURE_OPS=10000000
-WARMUP_OPS=3000000
+# WARMUP_OPS computed dynamically per cache size — see cache loop below
 
-# Total target database size (~100 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH
-TOTAL_DB_BYTES=100000000000
+# Total target database size (~70 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH
+TOTAL_DB_BYTES=90000000000
 
 # Workloads — C (100% read) first to keep cache stable, then A (50/50)
 WORKLOAD_LABELS=("workloadC" "workloadA")
@@ -29,7 +29,7 @@ CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
 
 # Object sizes — biggest first so disk/compaction issues surface early
 OBJECT_SIZE_LABELS=("100KB" "10KB" "1KB")
-FIELD_LENGTHS=(50000 10000 1000)
+FIELD_LENGTHS=(100000 10000 1000)
 
 SSH_USER=rzp5412
 CASS_DIR=/mydata/cassandra
@@ -303,7 +303,15 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
         # Soft restart with this cache size (evicts page cache, applies cgroup)
         restart_cluster "$cache_size"
 
-        # ONE warmup per cache size — 100% read, populates OS cache
+        # ONE warmup per cache size — ops calculated to fill cache 100%
+        # available = cgroup_limit - 8GB JVM heap
+        # warmup_ops = available_bytes / FIELD_LENGTH  (fills cache exactly once)
+        cache_gb="${cache_size//GB/}"
+        available_bytes=$(( (cache_gb - 8) * 1024 * 1024 * 1024 ))
+        WARMUP_OPS=$(( available_bytes / FIELD_LENGTH ))
+        if [ "$WARMUP_OPS" -lt 1000000 ]; then WARMUP_OPS=1000000; fi
+        echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${OBJECT_SIZE_LABEL} objects)"
+
         WARMUP_FILE="${CACHE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_${cache_size}_Warmup.scr"
         log_banner "$LOG" "$EXP_LABEL" "$OBJECT_SIZE_LABEL" "$cache_size" "WARMUP" "$WARMUP_FILE"
         echo "--- Warmup (${cache_size}, 100% read) ---"

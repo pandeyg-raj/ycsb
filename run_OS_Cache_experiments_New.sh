@@ -263,6 +263,8 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
     BASE_OUT_DIR="result_OS_CacheObjectSize_${EXP_LABEL}_${OBJECT_SIZE_LABEL}"
     mkdir -p "$BASE_OUT_DIR"
     LOG="${BASE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_run${FIELD_LENGTH}Bytes.log"
+    BREAKDOWN_FILE="${BASE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_breakdown.txt"
+    touch "$BREAKDOWN_FILE"
 
     # ── Hard restart and load data ────────────────────────────────────
     hard_restart_cluster
@@ -325,7 +327,7 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
             -P commonworkload \
             -s >> "$LOG" 2>&1
         echo "--- Warmup done ---"
-
+        
         # All workloads back-to-back — NO restart, NO extra warmup between them
         for i in "${!WORKLOAD_LABELS[@]}"; do
             workload="${WORKLOAD_LABELS[$i]}"
@@ -334,6 +336,9 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
             MEASURE_FILE="${CACHE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_${cache_size}_${workload}Run${FIELD_LENGTH}Bytes.scr"
             log_banner "$LOG" "$EXP_LABEL" "$OBJECT_SIZE_LABEL" "$cache_size" "$workload" "$MEASURE_FILE"
             echo "=== ${workload} | ${cache_size} | ${OBJECT_SIZE_LABEL} ==="
+            for node in "${NODE_LIST[@]}"; do
+                ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset"
+            done
             $YCSB_DIR run $DB -threads $THREADS \
                 -p operationcount=$MEASURE_OPS \
                 -p ${READ_PCT} \
@@ -344,6 +349,12 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
                 -P commonworkload \
                 -s >> "$LOG" 2>&1
             echo "=== Done: ${workload} | ${cache_size} | ${OBJECT_SIZE_LABEL} ==="
+            echo "run for ${EXP_LABEL} ${cache_size} ${workload} objsize=${OBJECT_SIZE_LABEL}" >> "$BREAKDOWN_FILE"
+            for node in "${NODE_LIST[@]}"; do
+                echo "-- node 10.10.1.$node --" >> "$BREAKDOWN_FILE"
+                ssh ${SSH_USER}@10.10.1.$node \
+                    "${CASS_DIR}/bin/nodetool breakdown | grep -E 'keyspace|ycsb'" >> "$BREAKDOWN_FILE"
+            done
         done
 
         echo ">>> All workloads done for cache=${cache_size}, objsize=${OBJECT_SIZE_LABEL}"

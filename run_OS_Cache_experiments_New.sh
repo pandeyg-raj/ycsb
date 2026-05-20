@@ -260,7 +260,7 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
     echo ">>> Total size   : ~$((TOTAL_DB_BYTES / 1000000000)) GB"
     echo "============================================================"
 
-    BASE_OUT_DIR="result_OS_CacheObjectSize_${OBJECT_SIZE_LABEL}"
+    BASE_OUT_DIR="result_OS_CacheObjectSize_${EXP_LABEL}_${OBJECT_SIZE_LABEL}"
     mkdir -p "$BASE_OUT_DIR"
     LOG="${BASE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_run${FIELD_LENGTH}Bytes.log"
 

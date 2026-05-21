@@ -16,7 +16,7 @@ MEASURE_OPS=10000000
 # WARMUP_OPS computed dynamically per cache size — see cache loop below
 
 # Total target database size (~70 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH
-TOTAL_DB_BYTES=90000000000
+TOTAL_DB_BYTES=100000000000
 
 # Workloads — C (100% read) first to keep cache stable, then A (50/50)
 WORKLOAD_LABELS=("workloadC" "workloadA")

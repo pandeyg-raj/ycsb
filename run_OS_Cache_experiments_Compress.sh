@@ -283,7 +283,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     echo ">>> Pool file           : ${POOL_FILE}"
     echo "============================================================"
 
-    BASE_OUT_DIR="result_OS_CacheCompress_${EXP_LABEL}_${COMPRESS_LABEL}"
+    BASE_OUT_DIR="result_OS_CacheCompress_${EXP_LABEL}_${COMPRESSION}_${COMPRESS_LABEL}"
     mkdir -p "$BASE_OUT_DIR"
     LOG="${BASE_OUT_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_run${FIELD_LENGTH}Bytes.log"
     BREAKDOWN_FILE="${BASE_OUT_DIR}/${EXP_LABEL}_${COMPRESS_LABEL}_breakdown.txt"

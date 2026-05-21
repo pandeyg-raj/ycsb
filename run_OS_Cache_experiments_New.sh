@@ -310,8 +310,13 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
         # warmup_ops = available_bytes / FIELD_LENGTH  (fills cache exactly once)
         cache_gb="${cache_size//GB/}"
         available_bytes=$(( (cache_gb - 8) * 1024 * 1024 * 1024 ))
-        WARMUP_OPS=$(( available_bytes / FIELD_LENGTH ))
-        if [ "$WARMUP_OPS" -lt 1000000 ]; then WARMUP_OPS=1000000; fi
+        if echo "$EXP_LABEL" | grep -qi "ec"; then
+            shard_size=$(( FIELD_LENGTH / 3 ))
+        else
+            shard_size=$FIELD_LENGTH
+        fi
+        objects_that_fit=$(( available_bytes / shard_size ))
+        WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT ))
         echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${OBJECT_SIZE_LABEL} objects)"
 
         WARMUP_FILE="${CACHE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_${cache_size}_Warmup.scr"

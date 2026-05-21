@@ -330,8 +330,14 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         # available = cgroup_limit - 8GB JVM heap
         cache_gb="${cache_size//GB/}"
         available_bytes=$(( (cache_gb - 8) * 1024 * 1024 * 1024 ))
-        WARMUP_OPS=$(( available_bytes / FIELD_LENGTH ))
-        if [ "$WARMUP_OPS" -lt 1000000 ]; then WARMUP_OPS=1000000; fi
+        if echo "$EXP_LABEL" | grep -qi "ec"; then
+            shard_size=$(( FIELD_LENGTH / 3 ))
+        else
+            shard_size=$FIELD_LENGTH
+        fi
+        objects_that_fit=$(( available_bytes / shard_size ))
+        WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT ))
+        
         echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${FIELD_LENGTH}B objects)"
 
         # Soft restart: evict page cache, apply cgroup limit

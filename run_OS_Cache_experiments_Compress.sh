@@ -18,7 +18,7 @@ MEASURE_OPS=10000000
 # WARMUP_OPS computed dynamically per cache size to fill cache 100%
 # formula: (cache_gb - 8) * 1GB / FIELD_LENGTH, floor 1M
 FIELD_LENGTH=10000
-RECORD_COUNT=7000000
+RECORD_COUNT=10000000
 
 # Workloads ordered read-heavy first — ONE warmup per cache keeps cache stable.
 # C (100% read) → B (95R/5ins) → D (95R/5ins latest) → A (50R/50ins worst case)

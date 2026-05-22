@@ -337,9 +337,9 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         fi
         objects_that_fit=$(( available_bytes / shard_size ))
         WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT ))
-        
-        echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${FIELD_LENGTH}B objects)"
         if [ "$WARMUP_OPS" -lt 1000000 ]; then WARMUP_OPS=1000000; fi
+        echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${FIELD_LENGTH}B objects)"
+        
         # Soft restart: evict page cache, apply cgroup limit
         restart_cluster "$cache_size"
 

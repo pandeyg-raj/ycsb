@@ -16,13 +16,13 @@ MEASURE_OPS=10000000
 # WARMUP_OPS computed dynamically per cache size — see cache loop below
 
 # Total target database size (~70 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH
-TOTAL_DB_BYTES=100000000000
+TOTAL_DB_BYTES=70000000000
 
 # Workloads — C (100% read) first to keep cache stable, then A (50/50)
 WORKLOAD_LABELS=("workloadC" "workloadA")
 READ_PROPORTIONS=(
-    "readproportion=1.0  -p insertproportion=0"   # C: 100% read
-    "readproportion=0.5  -p insertproportion=0.5"   # A: 50/50
+    "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"   # C: 100% read
+    "readproportion=0.5  -p updateproportion=0.5 -p insertproportion=0"   # A: 50/50
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
@@ -328,6 +328,7 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
             -p readproportion=1.0 -p updateproportion=0.0 -p insertproportion=0.0 \
             -p recordcount=${RECORD_COUNT} \
             -p measurement.raw.output_file="$WARMUP_FILE" \
+            -p fieldlength=${FIELD_LENGTH}
             -p cassandra.writeconsistencylevel=QUORUM \
             -p cassandra.readconsistencylevel=QUORUM \
             -P commonworkload \

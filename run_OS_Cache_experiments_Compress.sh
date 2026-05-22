@@ -323,7 +323,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         # Dynamic warmup ops: fills available page cache exactly once
         # available = cgroup_limit - 8GB JVM heap
         cache_gb="${cache_size//GB/}"
-        available_bytes=$(( (cache_gb) * 1024 * 1024 * 1024 ))
+        available_bytes=$(( (cache_gb - 8) * 1024 * 1024 * 1024 ))
         if echo "$EXP_LABEL" | grep -qi "ec"; then
             shard_size=$(( FIELD_LENGTH / 3 ))
         else

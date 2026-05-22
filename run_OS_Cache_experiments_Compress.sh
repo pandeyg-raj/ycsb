@@ -18,20 +18,14 @@ MEASURE_OPS=10000000
 # WARMUP_OPS computed dynamically per cache size to fill cache 100%
 # formula: (cache_gb - 8) * 1GB / FIELD_LENGTH, floor 1M
 FIELD_LENGTH=10000
-RECORD_COUNT=10000000
+RECORD_COUNT=7000000
 
-# Workloads ordered read-heavy first — ONE warmup per cache keeps cache stable.
-# C (100% read) → B (95R/5ins) → D (95R/5ins latest) → A (50R/50ins worst case)
-# All writes are INSERTS so original 10KB records are never overwritten.
-# Reads always return 10KB objects. recordcount limits reads to original data range.
-# Workload D also gets pool params (see run command) — latest distribution reads
-# back its own inserts which must also be 10KB pool values.
 WORKLOAD_LABELS=("workloadC" "workloadB" "workloadD" "workloadA")
 READ_PROPORTIONS=(
     "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"                             # C: read only
-    "readproportion=0.95 -p updateproportion=0.0 -p insertproportion=0.05"                          # B: read mostly
+    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                          # B: read mostly
     "readproportion=0.95 -p updateproportion=0.0 -p insertproportion=0.05 -p requestdistrib=latest" # D: read latest
-    "readproportion=0.5  -p updateproportion=0.0 -p insertproportion=0.5"                           # A: 50/50 (worst case)
+    "readproportion=0.5  -p updateproportion=0.5 -p insertproportion=0"                           # A: 50/50 (worst case)
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
@@ -329,7 +323,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         # Dynamic warmup ops: fills available page cache exactly once
         # available = cgroup_limit - 8GB JVM heap
         cache_gb="${cache_size//GB/}"
-        available_bytes=$(( (cache_gb - 8) * 1024 * 1024 * 1024 ))
+        available_bytes=$(( (cache_gb) * 1024 * 1024 * 1024 ))
         if echo "$EXP_LABEL" | grep -qi "ec"; then
             shard_size=$(( FIELD_LENGTH / 3 ))
         else
@@ -374,18 +368,11 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
                 ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset"
             done
 
-            # Workload D inserts must use pool values — latest distribution reads them back.
-            # All other workloads read original data only — no pool params needed.
-            WL_EXTRA_PARAMS=""
-            if [ "$workload" = "workloadD" ]; then
-                WL_EXTRA_PARAMS="-p fieldlength=${FIELD_LENGTH} -p valuepool.file=${POOL_FILE}"
-            fi
-
             $YCSB_DIR run $DB -threads $THREADS \
                 -p operationcount=$MEASURE_OPS \
                 -p ${READ_PCT} \
                 -p recordcount=${RECORD_COUNT} \
-                ${WL_EXTRA_PARAMS} \
+                ${POOL_PARAMS} \
                 -p measurement.raw.output_file="$MEASURE_FILE" \
                 -p cassandra.writeconsistencylevel=QUORUM \
                 -p cassandra.readconsistencylevel=QUORUM \

@@ -328,7 +328,6 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
             -p readproportion=1.0 -p updateproportion=0.0 -p insertproportion=0.0 \
             -p recordcount=${RECORD_COUNT} \
             -p measurement.raw.output_file="$WARMUP_FILE" \
-            -p fieldlength=${FIELD_LENGTH}
             -p cassandra.writeconsistencylevel=QUORUM \
             -p cassandra.readconsistencylevel=QUORUM \
             -P commonworkload \
@@ -351,6 +350,7 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
                 -p ${READ_PCT} \
                 -p recordcount=${RECORD_COUNT} \
                 -p measurement.raw.output_file="$MEASURE_FILE" \
+                -p fieldlength=${FIELD_LENGTH} \
                 -p cassandra.writeconsistencylevel=QUORUM \
                 -p cassandra.readconsistencylevel=QUORUM \
                 -P commonworkload \

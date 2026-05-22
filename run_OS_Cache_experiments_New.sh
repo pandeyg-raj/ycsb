@@ -317,8 +317,9 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
         fi
         objects_that_fit=$(( available_bytes / shard_size ))
         WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT ))
+        if [ "$WARMUP_OPS" -lt 1000000 ]; then WARMUP_OPS=1000000; fi
         echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${OBJECT_SIZE_LABEL} objects)"
-
+        
         WARMUP_FILE="${CACHE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_${cache_size}_Warmup.scr"
         log_banner "$LOG" "$EXP_LABEL" "$OBJECT_SIZE_LABEL" "$cache_size" "WARMUP" "$WARMUP_FILE"
         echo "--- Warmup (${cache_size}, 100% read) ---"

@@ -3,12 +3,14 @@
 # run_OS_Cache_experiments_Compress.sh
 #
 # Flow per compression dataset (jpeg, wiki, hdfs):
-#   hard_restart (wipe + full memory) → YCSB load → wait compaction
+#   hard_restart (wipe + full memory) → YCSB load → wait compaction →
+#   drain → stop → take_snapshot
 #   for each cache_size:
-#       restart_cluster(cache_size)
+#       stop_cluster → restore_from_snapshot → restart_cluster(cache_size)
 #       ONE warmup (ops scaled to fill cache 100%)
 #       for each workload (C→B→D→A):
 #           reset breakdown → measure → collect breakdown
+#   delete_snapshot
 # =============================================================================
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -23,9 +25,9 @@ RECORD_COUNT=7000000
 WORKLOAD_LABELS=("workloadC" "workloadB" "workloadD" "workloadA")
 READ_PROPORTIONS=(
     "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"                             # C: read only
-    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                          # B: read mostly
+    "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                            # B: read mostly
     "readproportion=0.95 -p updateproportion=0.0 -p insertproportion=0.05 -p requestdistrib=latest" # D: read latest
-    "readproportion=0.5  -p updateproportion=0.5 -p insertproportion=0"                           # A: 50/50 (worst case)
+    "readproportion=0.5  -p updateproportion=0.5 -p insertproportion=0"                             # A: 50/50 (worst case)
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
@@ -83,6 +85,69 @@ stop_cluster() {
         echo "  ${ip} stopped"
     done
     echo "=== All nodes stopped ==="
+}
+
+# =============================================================================
+# take_snapshot
+#   Hard-links data/ → data_snapshot/ on each node.
+#   Zero extra disk space. Cassandra must be stopped before calling.
+# =============================================================================
+take_snapshot() {
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+
+    echo ""
+    echo "=== Taking snapshot (hard links, zero extra disk) ==="
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        echo "  Snapshotting ${ip}..."
+        ssh ${SSH_USER}@${ip} \
+            "rm -rf ${CASS_DIR}/data_snapshot && \
+             cp -rl ${CASS_DIR}/data ${CASS_DIR}/data_snapshot"
+        echo "  Snapshot done on ${ip}"
+    done
+    echo "=== Snapshot complete ==="
+}
+
+# =============================================================================
+# restore_from_snapshot
+#   Replaces data/ with a fresh hard-link copy from data_snapshot/.
+#   Near-instant. Cassandra must be stopped before calling.
+# =============================================================================
+restore_from_snapshot() {
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+
+    echo ""
+    echo "=== Restoring from snapshot (instant) ==="
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        echo "  Restoring ${ip}..."
+        ssh ${SSH_USER}@${ip} \
+            "rm -rf ${CASS_DIR}/data && \
+             cp -rl ${CASS_DIR}/data_snapshot ${CASS_DIR}/data"
+        echo "  Restored ${ip}"
+    done
+    echo "=== Restore complete ==="
+}
+
+# =============================================================================
+# delete_snapshot
+#   Removes data_snapshot/ on all nodes after dataset is fully done.
+#   Frees disk before next dataset loads.
+# =============================================================================
+delete_snapshot() {
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+
+    echo ""
+    echo "=== Deleting snapshot on all nodes ==="
+    for node in "${nodes[@]}"; do
+        local ip="10.10.1.$node"
+        ssh ${SSH_USER}@${ip} "rm -rf ${CASS_DIR}/data_snapshot/"
+        echo "  Snapshot deleted on ${ip}"
+    done
+    echo "=== Snapshot deleted ==="
 }
 
 # =============================================================================
@@ -258,17 +323,19 @@ read THREADS
 # MAIN EXPERIMENT LOOP
 #
 # For each compression dataset:
-#   hard_restart → load → wait compaction
+#   hard_restart → load → wait compaction → drain → stop → take_snapshot
 #   for each cache_size:
-#       restart_cluster → ONE warmup (fills cache) → all workloads back-to-back
+#       stop_cluster → restore_from_snapshot → restart_cluster(cache_size)
+#       ONE warmup (fills cache) → all workloads back-to-back
 #       per workload: reset breakdown → measure → collect breakdown
+#   delete_snapshot
 # =============================================================================
 for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     COMPRESS_LABEL="${COMPRESS_LABELS[$compress_idx]}"
     POOL_FILE="${POOL_DIR}/${POOL_FILES[$compress_idx]}"
 
-    # POOL_PARAMS: passed to all run commands including workload D inserts —
-    # ensures new records use correct 10KB size and pool values
+    # POOL_PARAMS: passed to all run commands — ensures updates/inserts use
+    # correct 10KB pool values so reads always return consistent object size
     POOL_PARAMS="-p fieldlength=${FIELD_LENGTH} -p valuepool.file=${POOL_FILE}"
 
     echo ""
@@ -312,6 +379,19 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     done
     echo "--- Compaction settled ---"
 
+    # Drain all nodes — flush memtables to SSTables before snapshot
+    # Ensures snapshot captures fully persisted clean state
+    echo "--- Draining all nodes (flushing memtables) ---"
+    for node in "${BD_NODES[@]}"; do
+        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool drain" &
+    done
+    wait
+    echo "--- Drain complete ---"
+
+    # Stop cluster, take snapshot of clean loaded state
+    stop_cluster
+    take_snapshot
+
     # ── Cache size loop ───────────────────────────────────────────────
     for cache_size in "${CACHE_SIZES[@]}"; do
         echo ""
@@ -319,6 +399,11 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
 
         CACHE_OUT_DIR="${BASE_OUT_DIR}_${cache_size}"
         mkdir -p "$CACHE_OUT_DIR"
+
+        # Restore clean snapshot state before each cache size
+        # stop_cluster first in case Cassandra is still running from previous run
+        stop_cluster
+        restore_from_snapshot
 
         # Dynamic warmup ops: fills available page cache exactly once
         # available = cgroup_limit - 8GB JVM heap
@@ -333,7 +418,7 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
         WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT ))
         if [ "$WARMUP_OPS" -lt 1000000 ]; then WARMUP_OPS=1000000; fi
         echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${FIELD_LENGTH}B objects)"
-        
+
         # Soft restart: evict page cache, apply cgroup limit
         restart_cluster "$cache_size"
 
@@ -392,6 +477,9 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
 
         echo ">>> All workloads done for cache=${cache_size} | dataset=${COMPRESS_LABEL}"
     done
+
+    # Delete snapshot after all cache sizes complete — free disk for next dataset
+    delete_snapshot
 
     echo ">>> Completed all cache sizes for ${COMPRESS_LABEL}"
 done

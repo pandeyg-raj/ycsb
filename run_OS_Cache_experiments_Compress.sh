@@ -16,7 +16,7 @@
 # ── Config ────────────────────────────────────────────────────────────────────
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-MEASURE_OPS=10000000
+MEASURE_OPS=14000000
 # WARMUP_OPS computed dynamically per cache size to fill cache 100%
 # formula: (cache_gb - 8) * 1GB / FIELD_LENGTH, floor 1M
 FIELD_LENGTH=10000

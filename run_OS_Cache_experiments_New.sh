@@ -3,10 +3,12 @@
 # run_OS_Cache_experiments_New.sh
 #
 # Flow per object size:
-#   hard_restart (wipe + full memory) → YCSB load
+#   hard_restart (wipe + full memory + delete stale snapshot) → YCSB load
+#   wait compaction → drain → stop → take_snapshot
 #   for each cache_size:
-#       restart_cluster(cache_size) → ONE warmup → all workloads back-to-back
-#   next object size → hard_restart again
+#       stop_cluster → restore_from_snapshot → restart_cluster(cache_size)
+#       ONE warmup → all workloads back-to-back
+#   delete_snapshot → next object size → hard_restart again
 # =============================================================================
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -80,6 +82,60 @@ stop_cluster() {
 }
 
 # =============================================================================
+# take_snapshot
+#   Hard-links data/ → data_snapshot/ on each node.
+#   Zero extra disk space. Cassandra must be stopped before calling.
+# =============================================================================
+take_snapshot() {
+    echo ""
+    echo "=== Taking snapshot (hard links, zero extra disk) ==="
+    for node in "${NODE_LIST[@]}"; do
+        local ip="10.10.1.$node"
+        echo "  Snapshotting ${ip}..."
+        ssh ${SSH_USER}@${ip} \
+            "rm -rf ${CASS_DIR}/data_snapshot && \
+             cp -rl ${CASS_DIR}/data ${CASS_DIR}/data_snapshot"
+        echo "  Snapshot done on ${ip}"
+    done
+    echo "=== Snapshot complete ==="
+}
+
+# =============================================================================
+# restore_from_snapshot
+#   Replaces data/ with a fresh hard-link copy from data_snapshot/.
+#   Near-instant. Cassandra must be stopped before calling.
+# =============================================================================
+restore_from_snapshot() {
+    echo ""
+    echo "=== Restoring from snapshot (instant) ==="
+    for node in "${NODE_LIST[@]}"; do
+        local ip="10.10.1.$node"
+        echo "  Restoring ${ip}..."
+        ssh ${SSH_USER}@${ip} \
+            "rm -rf ${CASS_DIR}/data && \
+             cp -rl ${CASS_DIR}/data_snapshot ${CASS_DIR}/data"
+        echo "  Restored ${ip}"
+    done
+    echo "=== Restore complete ==="
+}
+
+# =============================================================================
+# delete_snapshot
+#   Removes data_snapshot/ on all nodes after object size is fully done.
+#   Frees disk before next object size loads.
+# =============================================================================
+delete_snapshot() {
+    echo ""
+    echo "=== Deleting snapshot on all nodes ==="
+    for node in "${NODE_LIST[@]}"; do
+        local ip="10.10.1.$node"
+        ssh ${SSH_USER}@${ip} "rm -rf ${CASS_DIR}/data_snapshot/"
+        echo "  Snapshot deleted on ${ip}"
+    done
+    echo "=== Snapshot deleted ==="
+}
+
+# =============================================================================
 # restart_cluster <cache_size>
 #   Soft restart — keeps data, applies cgroup memory limit, evicts page cache.
 #   One node at a time, seeds first.
@@ -137,7 +193,7 @@ restart_cluster() {
 # =============================================================================
 # hard_restart_cluster
 #   Phase 1: kill ALL nodes in parallel
-#   Phase 2: wipe ALL data in parallel
+#   Phase 2: wipe ALL data + stale snapshot in parallel
 #   Phase 3: start nodes sequentially (seeds first), create YCSB table
 #   Fix: all must be dead before any node starts to avoid UUID gossip collision
 # =============================================================================
@@ -167,13 +223,14 @@ hard_restart_cluster() {
         echo "  ${ip} stopped"
     done
 
-    # Phase 2 — wipe all in parallel
-    echo "  [2/3] Wiping data on all nodes..."
+    # Phase 2 — wipe data + stale snapshot in parallel
+    echo "  [2/3] Wiping data and stale snapshot on all nodes..."
     for node in "${NODE_LIST[@]}"; do
-        ssh ${SSH_USER}@10.10.1.${node} "rm -rf ${CASS_DIR}/data/" &
+        ssh ${SSH_USER}@10.10.1.${node} \
+            "rm -rf ${CASS_DIR}/data/ ${CASS_DIR}/data_snapshot/" &
     done
     wait
-    echo "  [2/3] All data wiped"
+    echo "  [2/3] All data and snapshots wiped"
 
     # Phase 3 — start sequentially, seeds first
     echo "  [3/3] Starting nodes sequentially (seeds first)..."
@@ -244,9 +301,11 @@ read -p "Read threads (for YCSB run):   " THREADS
 # MAIN EXPERIMENT LOOP
 #
 # For each object size:
-#   hard_restart → load
+#   hard_restart → load → wait compaction → drain → stop → take_snapshot
 #   for each cache_size:
-#     restart_cluster → ONE warmup → all workloads (no restart between them)
+#       stop_cluster → restore_from_snapshot → restart_cluster(cache_size)
+#       ONE warmup → all workloads back-to-back
+#   delete_snapshot → next object size
 # =============================================================================
 for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
     OBJECT_SIZE_LABEL="${OBJECT_SIZE_LABELS[$size_idx]}"
@@ -280,7 +339,7 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
         -s >> "$LOG" 2>&1
     echo "--- Load done ---"
 
-    # Wait for post-load compaction to settle before starting measurements
+    # Wait for post-load compaction to settle
     echo "--- Waiting for compaction to settle on all nodes ---"
     for node in "${NODE_LIST[@]}"; do
         ip="10.10.1.$node"
@@ -294,6 +353,19 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
     done
     echo "--- Compaction settled ---"
 
+    # Drain all nodes — flush memtables to SSTables before snapshot
+    # Ensures snapshot captures fully persisted clean state
+    echo "--- Draining all nodes (flushing memtables) ---"
+    for node in "${NODE_LIST[@]}"; do
+        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool drain" &
+    done
+    wait
+    echo "--- Drain complete ---"
+
+    # Stop cluster, take snapshot of clean loaded state
+    stop_cluster
+    take_snapshot
+
     # ── Cache size loop ───────────────────────────────────────────────
     for cache_size in "${CACHE_SIZES[@]}"; do
         echo ""
@@ -302,12 +374,13 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
         CACHE_OUT_DIR="${BASE_OUT_DIR}_${cache_size}"
         mkdir -p "$CACHE_OUT_DIR"
 
-        # Soft restart with this cache size (evicts page cache, applies cgroup)
-        restart_cluster "$cache_size"
+        # Restore clean snapshot state before each cache size
+        # stop_cluster first in case Cassandra still running from previous run
+        stop_cluster
+        restore_from_snapshot
 
-        # ONE warmup per cache size — ops calculated to fill cache 100%
+        # Dynamic warmup ops: fills available page cache exactly once
         # available = cgroup_limit - 8GB JVM heap
-        # warmup_ops = available_bytes / FIELD_LENGTH  (fills cache exactly once)
         cache_gb="${cache_size//GB/}"
         available_bytes=$(( (cache_gb - 8) * 1024 * 1024 * 1024 ))
         if echo "$EXP_LABEL" | grep -qi "ec"; then
@@ -319,7 +392,10 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
         WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT ))
         if [ "$WARMUP_OPS" -lt 1000000 ]; then WARMUP_OPS=1000000; fi
         echo ">>> Warmup ops: ${WARMUP_OPS} (fills ${cache_size} cache for ${OBJECT_SIZE_LABEL} objects)"
-        
+
+        # Soft restart: evict page cache, apply cgroup limit
+        restart_cluster "$cache_size"
+
         WARMUP_FILE="${CACHE_OUT_DIR}/${EXP_LABEL}_${OBJECT_SIZE_LABEL}_${cache_size}_Warmup.scr"
         log_banner "$LOG" "$EXP_LABEL" "$OBJECT_SIZE_LABEL" "$cache_size" "WARMUP" "$WARMUP_FILE"
         echo "--- Warmup (${cache_size}, 100% read) ---"
@@ -333,7 +409,7 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
             -P commonworkload \
             -s >> "$LOG" 2>&1
         echo "--- Warmup done ---"
-        
+
         # All workloads back-to-back — NO restart, NO extra warmup between them
         for i in "${!WORKLOAD_LABELS[@]}"; do
             workload="${WORKLOAD_LABELS[$i]}"
@@ -366,6 +442,9 @@ for size_idx in "${!OBJECT_SIZE_LABELS[@]}"; do
 
         echo ">>> All workloads done for cache=${cache_size}, objsize=${OBJECT_SIZE_LABEL}"
     done
+
+    # Delete snapshot after all cache sizes complete — free disk for next object size
+    delete_snapshot
 
     echo ""
     echo ">>> Completed all cache sizes for ${OBJECT_SIZE_LABEL}"

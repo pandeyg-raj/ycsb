@@ -14,7 +14,7 @@
 # ── Config ────────────────────────────────────────────────────────────────────
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-MEASURE_OPS=14000000
+MEASURE_OPS=10000000
 # WARMUP_OPS computed dynamically per cache size — see cache loop below
 
 # Total target database size (~70 GB). RECORD_COUNT = TOTAL_DB_BYTES / FIELD_LENGTH

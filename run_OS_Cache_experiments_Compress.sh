@@ -244,10 +244,11 @@ hard_restart_cluster() {
         echo "  ${ip} stopped"
     done
 
-    # Phase 2 — wipe all in parallel
-    echo "  [2/3] Wiping data on all nodes in parallel..."
+    # Phase 2 — wipe all in parallel (data + any stale snapshot)
+    echo "  [2/3] Wiping data and stale snapshot on all nodes in parallel..."
     for node in "${nodes[@]}"; do
-        ssh ${SSH_USER}@10.10.1.${node} "rm -rf ${CASS_DIR}/data/" &
+        ssh ${SSH_USER}@10.10.1.${node} \
+            "rm -rf ${CASS_DIR}/data/ ${CASS_DIR}/data_snapshot/" &
     done
     wait
     echo "  [2/3] All data wiped"

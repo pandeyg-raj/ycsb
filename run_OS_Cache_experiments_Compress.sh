@@ -22,13 +22,12 @@ MEASURE_OPS=10000000
 FIELD_LENGTH=10000
 RECORD_COUNT=7000000
 
-WORKLOAD_LABELS=("workloadC" "workloadB" "workloadD" "workloadA" "workloadC_postwrite")
+WORKLOAD_LABELS=("workloadC" "workloadB" "workloadD" "workloadA")
 READ_PROPORTIONS=(
     "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"                             # C: read only
     "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                            # B: read mostly
     "readproportion=0.95 -p updateproportion=0.0 -p insertproportion=0.05 -p requestdistrib=latest" # D: read latest
     "readproportion=0.5  -p updateproportion=0.5 -p insertproportion=0"                             # A: 50/50 (worst case)
-    "readproportion=1.0  -p updateproportion=0.0  -p insertproportion=0"                            # C_postwrite: read only (after writes)
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")
@@ -245,11 +244,10 @@ hard_restart_cluster() {
         echo "  ${ip} stopped"
     done
 
-    # Phase 2 — wipe all in parallel (data + any stale snapshot)
-    echo "  [2/3] Wiping data and stale snapshot on all nodes in parallel..."
+    # Phase 2 — wipe all in parallel
+    echo "  [2/3] Wiping data on all nodes in parallel..."
     for node in "${nodes[@]}"; do
-        ssh ${SSH_USER}@10.10.1.${node} \
-            "rm -rf ${CASS_DIR}/data/ ${CASS_DIR}/data_snapshot/" &
+        ssh ${SSH_USER}@10.10.1.${node} "rm -rf ${CASS_DIR}/data/" &
     done
     wait
     echo "  [2/3] All data wiped"
@@ -307,15 +305,6 @@ else
 fi
 echo "Nodes: ${BD_NODES[*]}"
 
-echo "Is compression ON or OFF? (on/off)"
-read COMPRESSION
-if echo "$EXP_LABEL" | grep -qi "rep"; then
-    CREATE_TABLE_BIN="create_table_rep_compr_$(echo $COMPRESSION | tr '[:upper:]' '[:lower:]')"
-else
-    CREATE_TABLE_BIN="create_table_ec_compr_$(echo $COMPRESSION | tr '[:upper:]' '[:lower:]')"
-fi
-echo "Confirmed: using /mydata/${CREATE_TABLE_BIN}"
-
 echo "How many write threads?"
 read WTHREADS
 echo "How many read threads?"
@@ -324,15 +313,32 @@ read THREADS
 # =============================================================================
 # MAIN EXPERIMENT LOOP
 #
-# For each compression dataset:
-#   hard_restart → load → wait compaction → drain → stop → take_snapshot
-#   for each cache_size:
-#       stop_cluster → restore_from_snapshot → restart_cluster(cache_size)
-#       ONE warmup (fills cache) → all workloads back-to-back
-#       per workload: reset breakdown → measure → collect breakdown
-#   delete_snapshot
+# For each compression state (on → off):
+#   Set correct CREATE_TABLE_BIN for this state
+#   For each dataset (jpeg, wiki, hdfs):
+#     hard_restart → load → wait compaction → drain → stop → take_snapshot
+#     for each cache_size:
+#         stop → restore → restart → warmup → all workloads
+#         per workload: reset breakdown → measure → collect breakdown
+#     delete_snapshot
+#   Between on/off: hard_restart of next iteration wipes everything clean
 # =============================================================================
-for compress_idx in "${!COMPRESS_LABELS[@]}"; do
+for COMPRESSION in "on" "off"; do
+
+    # Set correct binary for this compression state
+    if echo "$EXP_LABEL" | grep -qi "rep"; then
+        CREATE_TABLE_BIN="create_table_rep_compr_${COMPRESSION}"
+    else
+        CREATE_TABLE_BIN="create_table_ec_compr_${COMPRESSION}"
+    fi
+
+    echo ""
+    echo "################################################################"
+    echo ">>> ${EXP_LABEL^^} — Compression ${COMPRESSION^^}"
+    echo ">>> Binary: /mydata/${CREATE_TABLE_BIN}"
+    echo "################################################################"
+
+    for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     COMPRESS_LABEL="${COMPRESS_LABELS[$compress_idx]}"
     POOL_FILE="${POOL_DIR}/${POOL_FILES[$compress_idx]}"
 
@@ -484,7 +490,14 @@ for compress_idx in "${!COMPRESS_LABELS[@]}"; do
     delete_snapshot
 
     echo ">>> Completed all cache sizes for ${COMPRESS_LABEL}"
+    done
+    # ── End of dataset loop ──────────────────────────────────────────
+
+    echo ""
+    echo ">>> Completed ${EXP_LABEL^^} compression ${COMPRESSION^^} for all datasets"
+
 done
+# ── End of compression loop ──────────────────────────────────────────────────
 
 echo ""
 echo "All experiments completed successfully."

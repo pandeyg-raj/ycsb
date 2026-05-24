@@ -261,6 +261,16 @@ public class CassandraCQLClient extends DB {
 
         session = cluster.connect(keyspace);
 
+         System.err.println(">>> All hosts known to driver:");
+  for (Host host : cluster.getMetadata().getAllHosts()) {
+      System.err.println(String.format(">>>   addr=%s  isUp=%s  state=%s  dc=%s",
+          host.getAddress(),
+          host.isUp(),
+          host.getState(),
+          host.getDatacenter()));
+  }
+  System.err.println(">>> End hosts");
+
       } catch (Exception e) {
         throw new DBException(e);
       }

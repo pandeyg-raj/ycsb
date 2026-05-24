@@ -22,12 +22,13 @@ MEASURE_OPS=10000000
 FIELD_LENGTH=10000
 RECORD_COUNT=7000000
 
-WORKLOAD_LABELS=("workloadC" "workloadB" "workloadD" "workloadA")
+WORKLOAD_LABELS=("workloadC" "workloadB" "workloadD" "workloadA" "workloadC_postwrite")
 READ_PROPORTIONS=(
     "readproportion=1.0  -p updateproportion=0.0 -p insertproportion=0"                             # C: read only
     "readproportion=0.95 -p updateproportion=0.05 -p insertproportion=0"                            # B: read mostly
     "readproportion=0.95 -p updateproportion=0.0 -p insertproportion=0.05 -p requestdistrib=latest" # D: read latest
     "readproportion=0.5  -p updateproportion=0.5 -p insertproportion=0"                             # A: 50/50 (worst case)
+    "readproportion=1.0  -p updateproportion=0.0  -p insertproportion=0"                            # C_postwrite: read only (after writes)
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")

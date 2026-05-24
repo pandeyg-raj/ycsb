@@ -148,14 +148,6 @@ public class CassandraCQLClient extends DB {
    */
   @Override
   public void init() throws DBException {
-
-    System.err.println("============================================================");
-      System.err.println("=== CUSTOM ROUND_ROBIN BUILD — IF YOU SEE THIS, IT'S MINE ===");
-      System.err.println("=== Active policy: " +
-          new RoundRobinPolicy().getClass().getSimpleName() + " ===");
-      System.err.println("============================================================");
-
-
     // Keep track of number of calls to init (for later cleanup)
     INIT_COUNT.incrementAndGet();
 
@@ -260,17 +252,6 @@ public class CassandraCQLClient extends DB {
         }
 
         session = cluster.connect(keyspace);
-
-         System.err.println(">>> All hosts known to driver:");
-  for (Host h : cluster.getMetadata().getAllHosts()) {
-      System.err.println(String.format(">>>   addr=%s  isUp=%s  state=%s  dc=%s",
-          h.getAddress(),
-          h.isUp(),
-          h.getState(),
-          h.getDatacenter()));
-  }
-  System.err.println(">>> End hosts");
-
       } catch (Exception e) {
         throw new DBException(e);
       }

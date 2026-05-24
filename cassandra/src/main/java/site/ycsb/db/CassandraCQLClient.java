@@ -34,6 +34,8 @@ import com.datastax.driver.core.querybuilder.Select;
 import com.datastax.driver.core.querybuilder.Update;
 import com.datastax.driver.core.policies.WhiteListPolicy;
 import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
+import com.datastax.driver.core.policies.RoundRobinPolicy;
+
 import java.net.InetSocketAddress;
 import java.util.Collections;
 import site.ycsb.ByteArrayByteIterator;
@@ -201,6 +203,7 @@ public class CassandraCQLClient extends DB {
         } else {
           cluster = Cluster.builder().withPort(Integer.valueOf(port))
               .addContactPoints(hosts)
+              .withLoadBalancingPolicy(new RoundRobinPolicy())
               //.withLoadBalancingPolicy(
               //      new WhiteListPolicy(
               //      DCAwareRoundRobinPolicy.builder().build(),

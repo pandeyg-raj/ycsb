@@ -149,6 +149,13 @@ public class CassandraCQLClient extends DB {
   @Override
   public void init() throws DBException {
 
+    System.err.println("============================================================");
+      System.err.println("=== CUSTOM ROUND_ROBIN BUILD — IF YOU SEE THIS, IT'S MINE ===");
+      System.err.println("=== Active policy: " +
+          new RoundRobinPolicy().getClass().getSimpleName() + " ===");
+      System.err.println("============================================================");
+
+
     // Keep track of number of calls to init (for later cleanup)
     INIT_COUNT.incrementAndGet();
 

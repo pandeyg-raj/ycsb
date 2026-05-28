@@ -12,9 +12,9 @@
 # ── Config ───────────────────────────────────────────────────────────────────
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-MEASURE_OPS=10000000
+MEASURE_OPS=1000000
 FIELD_LENGTH=10000
-RECORD_COUNT=7000000
+RECORD_COUNT=2000000
 SSH_USER=rzp5412
 CASS_DIR=/mydata/cassandra
 POOL_DIR=/mydata/compressData
@@ -133,7 +133,14 @@ else
     echo "ERROR: must be 3 or 5"; exit 1
 fi
 read -p "Load fresh data? (y/n): " DO_LOAD
-read -p "Read threads (for workload C): " THREADS
+read -p "Dataset (jpeg/wiki/hdfs): " DATASET
+read -p "Read threads (for workloads): " THREADS
+
+POOL_FILE="${POOL_DIR}/values_pool_${DATASET}.txt"
+if [ ! -f "$POOL_FILE" ]; then
+    echo "ERROR: pool file ${POOL_FILE} not found"
+    exit 1
+fi
 
 # Determine create-table binary
 if echo "$EXP_LABEL" | grep -qi "rep"; then
@@ -158,14 +165,7 @@ touch "$BREAKDOWN_FILE"
 # Load (only if requested)
 # =============================================================================
 if [ "$DO_LOAD" = "y" ] || [ "$DO_LOAD" = "Y" ]; then
-    read -p "Dataset for load (jpeg/wiki/hdfs): " DATASET
     read -p "Write threads (for load): " WTHREADS
-    POOL_FILE="${POOL_DIR}/values_pool_${DATASET}.txt"
-
-    if [ ! -f "$POOL_FILE" ]; then
-        echo "ERROR: pool file ${POOL_FILE} not found"
-        exit 1
-    fi
 
     hard_restart_cluster
 
@@ -179,6 +179,14 @@ if [ "$DO_LOAD" = "y" ] || [ "$DO_LOAD" = "Y" ]; then
         -P commonworkload \
         -s >> "$LOG" 2>&1
     echo "--- Load done ---"
+
+    # Flush memtables to SSTables on all nodes (parallel)
+    echo "--- Flushing memtables on all nodes ---"
+    for node in "${BD_NODES[@]}"; do
+        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool flush" &
+    done
+    wait
+    echo "--- Flush complete ---"
 
     # Wait for post-load compaction to settle
     echo "--- Waiting for compaction to settle on all nodes ---"
@@ -224,6 +232,41 @@ echo "=== Workload C done ==="
 
 # Collect breakdown
 echo "run for ${EXP_LABEL} compr=${COMPRESSION} workloadC" >> "$BREAKDOWN_FILE"
+for node in "${BD_NODES[@]}"; do
+    echo "-- node 10.10.1.$node --" >> "$BREAKDOWN_FILE"
+    ssh ${SSH_USER}@10.10.1.$node \
+        "${CASS_DIR}/bin/nodetool breakdown | grep -E 'keyspace|ycsb'" >> "$BREAKDOWN_FILE"
+done
+
+# =============================================================================
+# Workload A — 50% read / 50% update
+# =============================================================================
+MEASURE_FILE_A="${OUT_DIR}/workloadA.scr"
+echo ""
+echo "=== Workload A: 50% read / 50% update, ${MEASURE_OPS} ops, ${THREADS} threads ==="
+
+# Reset breakdown counters
+echo "--- Resetting breakdown counters ---"
+for node in "${BD_NODES[@]}"; do
+    ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset"
+done
+
+$YCSB_DIR run $DB -threads $THREADS \
+    -p operationcount=$MEASURE_OPS \
+    -p readproportion=0.5 -p updateproportion=0.5 -p insertproportion=0.0 \
+    -p recordcount=${RECORD_COUNT} \
+    -p fieldlength=${FIELD_LENGTH} \
+    -p valuepool.file=${POOL_FILE} \
+    -p measurement.raw.output_file="$MEASURE_FILE_A" \
+    -p cassandra.writeconsistencylevel=QUORUM \
+    -p cassandra.readconsistencylevel=QUORUM \
+    -P commonworkload \
+    -s >> "$LOG" 2>&1
+
+echo "=== Workload A done ==="
+
+# Collect breakdown
+echo "run for ${EXP_LABEL} compr=${COMPRESSION} workloadA" >> "$BREAKDOWN_FILE"
 for node in "${BD_NODES[@]}"; do
     echo "-- node 10.10.1.$node --" >> "$BREAKDOWN_FILE"
     ssh ${SSH_USER}@10.10.1.$node \

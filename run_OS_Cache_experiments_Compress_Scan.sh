@@ -24,7 +24,7 @@ RECORD_COUNT=7000000
 
 WORKLOAD_LABELS=("workloadE")
 READ_PROPORTIONS=(
-    "scanproportion=0.95  -p updateproportion=0.0 -p insertproportion=0.05 -p requestdistribution=zipfian -p maxscanlength=100 -p scanlengthdistribution=uniform"
+    "readproportion=0.0 -p scanproportion=0.95  -p updateproportion=0.0 -p insertproportion=0.05 -p requestdistribution=zipfian -p maxscanlength=100 -p scanlengthdistribution=uniform"
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")

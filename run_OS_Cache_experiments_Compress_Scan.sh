@@ -22,9 +22,11 @@ MEASURE_OPS=1000000
 FIELD_LENGTH=10000
 RECORD_COUNT=7000000
 
-WORKLOAD_LABELS=("workloadE")
+WORKLOAD_LABELS=("workloadEUni" "workloadEZip")
 READ_PROPORTIONS=(
-    "readproportion=0.0 -p scanproportion=0.95  -p updateproportion=0.0 -p insertproportion=0.05 -p maxscanlength=100 -p scanlengthdistribution=uniform"
+    "readproportion=0.0 -p scanproportion=0.95  -p updateproportion=0.0 -p insertproportion=0.05 -p maxscanlength=100 -p requestdistribution=uniform -p scanlengthdistribution=uniform"
+    "readproportion=0.0 -p scanproportion=0.95  -p updateproportion=0.0 -p insertproportion=0.05 -p maxscanlength=100 -p requestdistribution=zipfian -p scanlengthdistribution=uniform"
+
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")

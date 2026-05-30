@@ -16,7 +16,7 @@
 # ── Config ────────────────────────────────────────────────────────────────────
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
-MEASURE_OPS=100000
+MEASURE_OPS=1000000
 # WARMUP_OPS computed dynamically per cache size to fill cache 100%
 # formula: (cache_gb - 8) * 1GB / FIELD_LENGTH, floor 1M
 FIELD_LENGTH=10000
@@ -24,7 +24,7 @@ RECORD_COUNT=7000000
 
 WORKLOAD_LABELS=("workloadE")
 READ_PROPORTIONS=(
-    "readproportion=0.0 -p scanproportion=0.95  -p updateproportion=0.0 -p insertproportion=0.05 -p requestdistribution=zipfian -p maxscanlength=100 -p scanlengthdistribution=uniform"
+    "readproportion=0.0 -p scanproportion=0.95  -p updateproportion=0.0 -p insertproportion=0.05 -p maxscanlength=100 -p scanlengthdistribution=uniform"
 )
 
 CACHE_SIZES=("16GB" "28GB" "40GB" "52GB" "64GB")

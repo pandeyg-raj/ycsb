@@ -7,7 +7,7 @@ YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
 
 FIELD_LENGTH=10000
-RECORD_COUNT=1000000          # 1M x 10KB = ~10GB logical (fits in memory)
+RECORD_COUNT=10000000          # 1M x 10KB = ~10GB logical (fits in memory)
 WARMUP_OPS=$(( 2 * RECORD_COUNT ))   # read all keys twice
 MEASURE_OPS=1000000           # read-only run (1M -> one sequential pass over all 1M keys)
 CACHE_SIZE="32GB"             # matches paper ("10GB fits within 32GB memory")

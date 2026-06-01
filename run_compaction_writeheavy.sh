@@ -1,6 +1,34 @@
 #!/bin/bash
 # =============================================================================
-# run_compaction_writeheavy.sh   
+# run_compaction_writeheavy.sh   -- Paper Section 6.6 (Impact on Compaction)
+#
+# Goal: under a write-heavy workload, quantify the compaction / write-
+# amplification cost of LEAST RS(5,3) vs Cassandra RF=3, and show whether
+# EC's update-after-flush path (Case 2) inflates it. Compaction stays ON.
+#
+# Metrics (strongest first):
+#   1. PHYSICAL WRITE VOLUME  -- dm-0 /proc/diskstats sectors_written delta
+#        * cluster-summed bytes written to the data LV over the window
+#        * / logical bytes ingested = total write amplification (fair, kernel)
+#   2. COMPACTION VOLUME      -- system.compaction_history (cqlsh COPY -> CSV)
+#        * id-set diff before/after, sum bytes_in/bytes_out for the ycsb ks
+#        * isolates the compaction slice of (1); bytes_out/bytes_in = merge amp
+#   3. MECHANISM (EC only)    -- nodetool ecwritestats  (RESET before measure)
+#        * case1(memtable_replace) vs case2(sstable_insert); case2% is the
+#          knob that, if it climbs under heavy writes, drives write-amp up
+#   4. STEADY-STATE STORAGE   -- du + nodetool tablestats "Space used", at
+#        quiescence (after compaction drains)
+#   5. BACKLOG / EFFORT       -- nodetool compactionstats pending sampled during
+#        the run; nodetool breakdown "keyspace,Compaction" timer (count+avg)
+#
+# Fixed config: 70 GB (7M x 10KB), 5 nodes BOTH systems, 90% update / 10% read,
+# uniform, compression ON, 32 GB cap, QUORUM r/w, MEASURE_OPS=10M.
+#
+# Methodological key: the measure window is bracketed by quiescent states
+# (pending->0 before AND after), so every byte of compaction in the diff was
+# caused by the measure-phase writes -- including compaction that finishes
+# AFTER YCSB exits (that is why we wait-for-quiescence before the AFTER snap).
+# =============================================================================
 
 # -- Config -------------------------------------------------------------------
 YCSB_DIR=bin/ycsb.sh
@@ -236,7 +264,7 @@ else
 fi
 
 # cqlsh preflight (non-fatal): compaction-volume CSV depends on it.
-if ! ssh ${SSH_USER}@10.10.1.${BD_NODES[0]} "${CASS_DIR}/bin/cqlsh 10.10.1.${BD_NODES[0]} -e 'SELECT now() FROM system.local' > /dev/null 2>&1"; then
+if ! ssh ${SSH_USER}@10.10.1.${BD_NODES[0]} "${CASS_DIR}/bin/cqlsh 10.10.1.${BD_NODES[0]} -e 'SELECT release_version FROM system.local' > /dev/null 2>&1"; then
     echo "WARN: cqlsh check failed on node ${BD_NODES[0]}. compaction_history CSV may be empty;"
     echo "      dm-0 write volume + ecwritestats + storage are unaffected. Continuing."
 fi

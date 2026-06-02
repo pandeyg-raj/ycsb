@@ -92,7 +92,7 @@ read -p "  ENTER >> " _
 # =============================================================================
 echo "=== RUN: ${MEASURE_OPS} reads | 100% | QUORUM ==="
 $YCSB run $DB -threads $THREADS -p operationcount=$MEASURE_OPS \
-    -p readproportion=1.0 -p updateproportion=0.0 -p insertproportion=0.0 \
+    -p readproportion=0.5 -p updateproportion=0.5 -p insertproportion=0.0 \
     -p readallfields=false -p recordcount=${RECORD_COUNT} \
     -p requestdistribution=${REQUEST_DIST} \
     -p cassandra.readconsistencylevel=QUORUM \

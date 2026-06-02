@@ -17,20 +17,45 @@ CASS_DIR=/mydata/cassandra
 CGROUP=/sys/fs/cgroup/mylimitedgroup
 
 # =============================================================================
-# drain + cap + evict  (all idempotent -> safe to run from both clients)
+# restart_cluster <cache_size>  (soft: keep data, set cgroup, evict page cache)
 # =============================================================================
-drain_cap_evict() {
-    local nodes; if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
-    local cache_gb="${CACHE_SIZE//GB/}"; local mem_bytes=$((cache_gb*1024*1024*1024))
-    echo "--- drain + cap ${CACHE_SIZE} + evict page cache ---"
+restart_cluster() {
+    local cache_size=$1
+    local nodes
+    if [ "$NUM_NODES" = "3" ]; then nodes=(2 3 4); else nodes=(2 3 4 5 6); fi
+    local cache_gb="${cache_size//GB/}"
+    local mem_bytes=$((cache_gb * 1024 * 1024 * 1024))
+    echo ""; echo "=== Soft restart: nodes ${nodes[*]}, cache=${cache_size} ==="
     for node in "${nodes[@]}"; do
         local ip="10.10.1.$node"
-        ssh ${SSH_USER}@${ip} "${CASS_DIR}/bin/nodetool drain 2>/dev/null; true"
+        echo "  --- ${ip} ---"
         ssh ${SSH_USER}@${ip} \
-            "echo ${mem_bytes} | sudo tee ${CGROUP}/memory.max > /dev/null && \
-             vmtouch -e ${CASS_DIR}/data/ > /dev/null 2>&1; true"
-        echo "  ${ip}: drained, capped, evicted"
+            "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill 2>/dev/null; true"
+        local ka=0
+        while ssh ${SSH_USER}@${ip} \
+            "ps -ef | grep '[j]ava' | grep -i 'cassandra' > /dev/null 2>&1"; do
+            sleep 10; ka=$((ka + 1))
+            if [ "$ka" -ge 6 ]; then
+                ssh ${SSH_USER}@${ip} \
+                    "ps -ef | grep '[j]ava' | grep -i 'cassandra' | awk '{print \$2}' | xargs kill -9 2>/dev/null; true"
+                sleep 5; break
+            fi
+        done
+        ssh ${SSH_USER}@${ip} \
+            "cd ${CASS_DIR} && \
+             echo ${mem_bytes} | sudo tee ${CGROUP}/memory.max && \
+             echo \$\$ | sudo tee ${CGROUP}/cgroup.procs && \
+             vmtouch -e data/ > /dev/null 2>&1 && \
+             bin/cassandra > /dev/null 2>&1"
+        local sa=0
+        until ssh ${SSH_USER}@${ip} \
+            "${CASS_DIR}/bin/nodetool status 2>/dev/null | grep '${ip}' | grep -q 'UN'"; do
+            sleep 10; sa=$((sa + 1)); echo "  Waiting for UN... (${sa}/30)"
+            if [ "$sa" -ge 30 ]; then echo "  ERROR: ${ip} not UN after 5 min."; exit 1; fi
+        done
+        echo "  ${ip} UN"
     done
+    echo "=== Soft restart complete (${cache_size}). ==="
 }
 
 # =============================================================================
@@ -61,11 +86,11 @@ $YCSB load $DB -threads $THREADS \
     -P commonworkload -s >> "$LOG" 2>&1
 echo "--- load done ---"
 
-drain_cap_evict
+restart_cluster "$CACHE_SIZE"
 
 # ============================== BARRIER 1 ====================================
 echo ""; echo "============================================================"
-echo " BARRIER 1  -- both clients should be here (load + drain done)."
+echo " BARRIER 1  -- both clients should be here (load)."
 echo " Press ENTER on BOTH machines to start WARMUP."
 read -p "  ENTER >> " _
 

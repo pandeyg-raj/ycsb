@@ -10,7 +10,7 @@ CACHE_SIZE="32GB"
 COMPRESSION="on"
 REQUEST_DIST="uniform"
 WARMUP_OPS=${RECORD_COUNT}  # one full pass of this client's field
-MEASURE_OPS=10000000        # 10M reads of this client's field
+MEASURE_OPS=5000000        # 10M reads of this client's field
 
 SSH_USER=rzp5412
 CASS_DIR=/mydata/cassandra

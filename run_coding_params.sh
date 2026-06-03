@@ -39,7 +39,7 @@ READ_PROPORTION=0.5
 UPDATE_PROPORTION=0.5
 INSERT_PROPORTION=0
 
-CREATE_TABLE_BIN=/mydata/create_table_ec_compr_on
+CREATE_TABLE_BIN=/mydata/create_table_ec_compr_on_RF_8
 K_LIST=(2 4 6)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

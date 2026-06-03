@@ -31,8 +31,8 @@ CACHE_GB=32                         # per-node cgroup memory.max
 RECORD_COUNT=7000000
 FIELD_LENGTH=10000                  # 10 KB cells, default YCSB high-entropy
 MEASURE_OPS=10000000
-THREADS=16
-WTHREADS=16
+THREADS=15
+WTHREADS=15
 
 # 50/50 read/update -- workloadA semantics
 READ_PROPORTION=0.5

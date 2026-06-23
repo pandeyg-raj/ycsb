@@ -41,7 +41,7 @@ LOAD_THREADS=15           # YCSB load (insert) threads
 ITERS=2                   # repeats per config (hard reset between each)
 
 FIELD_LENGTH=10000
-RECORD_COUNT=400000
+RECORD_COUNT=4000000
 COMPRESSION="on"
 
 # If 1: flush + settle compaction BEFORE the AFTER snapshot (complete write-amp).

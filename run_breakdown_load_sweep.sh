@@ -37,11 +37,11 @@
 
 # -- Editable constants (NO prompt; only the binary swap is interactive) -------
 CACHE_GB=32               # cgroup memory cap applied at daemon start
-LOAD_THREADS=32           # YCSB load (insert) threads
+LOAD_THREADS=15           # YCSB load (insert) threads
 ITERS=2                   # repeats per config (hard reset between each)
 
 FIELD_LENGTH=10000
-RECORD_COUNT=700000
+RECORD_COUNT=400000
 COMPRESSION="on"
 
 # If 1: flush + settle compaction BEFORE the AFTER snapshot (complete write-amp).

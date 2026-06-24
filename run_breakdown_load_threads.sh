@@ -36,7 +36,7 @@ DB=cassandra-cql
 THREAD_LIST=(4 8 12 16)   # one load run per thread count, hard reset between each
 
 FIELD_LENGTH=10000
-RECORD_COUNT=700000
+RECORD_COUNT=500000
 COMPRESSION="on"
 
 NUM_NODES=5

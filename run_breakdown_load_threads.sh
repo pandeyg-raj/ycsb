@@ -36,7 +36,7 @@ DB=cassandra-cql
 THREAD_LIST=(4 8 12 16)   # one load run per thread count, hard reset between each
 
 FIELD_LENGTH=10000
-RECORD_COUNT=500000
+RECORD_COUNT=5000000
 COMPRESSION="on"
 
 NUM_NODES=5
@@ -180,6 +180,7 @@ run_one_load() {
     $YCSB_DIR load $DB -threads $threads \
         -p recordcount=${RECORD_COUNT} -p fieldlength=${FIELD_LENGTH} \
         -p measurement.raw.output_file="${OUT_DIR}/Load.scr" \
+        -p cassandra.writeconsistencylevel=QUORUM -p cassandra.readconsistencylevel=QUORUM \
         -P commonworkload -s >> "$LOG" 2>&1
     echo "=== LOAD done (threads=${threads}) ==="
 

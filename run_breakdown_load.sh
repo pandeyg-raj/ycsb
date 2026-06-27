@@ -242,6 +242,15 @@ for node in "${BD_NODES[@]}"; do
         "${CASS_DIR}/bin/nodetool tablestats ycsb.usertable" >> "$TABLESTATS_FILE" 2>&1
 done
 
+echo "--- Collecting compaction history (ycsb compactions, settled) ---"                                                                                                        
+COMPACTION_FILE="${OUT_DIR}/compaction_history.txt"                                                                                                                             
+echo "compaction ${EXP_LABEL} ${CACHE_SIZE} compr=${COMPRESSION}" > "$COMPACTION_FILE"                                                                                          
+for node in "${BD_NODES[@]}"; do                                                                                                                                                
+    echo "-- node 10.10.1.$node --" >> "$COMPACTION_FILE"                                                                                                                       
+    ssh ${SSH_USER}@10.10.1.$node \                                                                                                                                             
+        "${CASS_DIR}/bin/nodetool compactionhistory | awk '\$2==\"ycsb\"{i+=\$5; o+=\$6; k++} END{printf                                                                        
+\"ycsb,CompactionHistory,bytes_in=%d,bytes_out=%d,out_gb=%.3f,count=%d\\n\", i+0, o+0, (o+0)/1e9, k+0}'" >> "$COMPACTION_FILE"                                                  
+done 
 # 5) Parse: dm-0 write+read bytes (primary) + memcg (corroboration) + write-amp
 INS_OPS=$RECORD_COUNT
 SUMMARY="${OUT_DIR}/load_io_summary.txt"

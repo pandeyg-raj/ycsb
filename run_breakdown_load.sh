@@ -48,6 +48,36 @@ DATA_DEV=dm-0              # /mydata LV (confirmed 253:0)
 # write-amp). If 0 (default): snapshot the instant `ycsb load` returns.
 MEASURE_INCLUDES_FLUSH_SETTLE=1
 
+# Wait for REAL compaction settlement on every node:                                                                                                                            
+  #   pending tasks == 0  AND  ycsb compaction count unchanged,                                                                                                                   
+  #   sustained for STABLE_NEEDED consecutive polls (defeats momentary lulls).                                                                                                    
+  wait_for_compaction_settle() {                                                                                                                                                  
+      local poll=30          # seconds between polls                                                                                                                              
+      local stable_needed=3  # consecutive clean polls required                                                                                                                   
+      echo "--- Waiting for real compaction settlement ---"                                                                                                                       
+      for node in "${BD_NODES[@]}"; do                                                                                                                                            
+          local ip="10.10.1.$node"                                                                                                                                                
+          local stable=0 prev=-1                                                                                                                                                  
+          while [ "$stable" -lt "$stable_needed" ]; do                                                                                                                            
+              local pending hist                                                                                                                                                  
+              pending=$(ssh ${SSH_USER}@${ip} \                                                                                                                                   
+                  "${CASS_DIR}/bin/nodetool compactionstats 2>/dev/null | awk '/pending tasks/{print \$NF}'")                                                                     
+              hist=$(ssh ${SSH_USER}@${ip} \                                                                                                                                      
+                  "${CASS_DIR}/bin/nodetool compactionhistory 2>/dev/null | awk '\$2==\"ycsb\"' | wc -l")                                                                         
+              pending=${pending:-1}   # treat parse failure as not-settled
+              if [ "$pending" = "0" ] && [ "$hist" = "$prev" ]; then                                                                                                              
+                  stable=$((stable + 1))                                                                                                                                          
+              else                                                                                                                                                                
+                  stable=0                                                                                                                                                        
+              fi                                                                                                                                                                  
+              prev="$hist"                                                                                                                                                        
+              echo "  ${ip}: pending=${pending} ycsb_compactions=${hist} stable=${stable}/${stable_needed}"                                                                       
+              [ "$stable" -lt "$stable_needed" ] && sleep "$poll"                                                                                                                 
+          done                                                                                                                                                                    
+          echo "  ${ip} settled (ycsb compactions=${prev})"                                                                                                                       
+      done                                                                                                                                                                        
+      echo "--- All nodes settled ---"                                                                                                                                            
+  }  
 # =============================================================================
 # HARD restart: wipe data, then start each node UNDER the X GB cgroup cap.
 # Compaction is left ON (we never disableautocompaction in the load script).
@@ -183,19 +213,12 @@ $YCSB_DIR load $DB -threads $WTHREADS \
 echo "=== LOAD done ==="
 
 # Optional: pull residual memtables + in-flight compaction into the window.
-if [ "$MEASURE_INCLUDES_FLUSH_SETTLE" = "1" ]; then
-    echo "--- Flushing + settling compaction (included in window) ---"
-    for node in "${BD_NODES[@]}"; do ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool flush" & done
-    wait
-    for node in "${BD_NODES[@]}"; do
-        ip="10.10.1.$node"
-        while ssh ${SSH_USER}@${ip} \
-            "${CASS_DIR}/bin/nodetool compactionstats 2>/dev/null | grep -q 'pending tasks: [^0]'"; do
-            sleep 30; echo "  compaction running on ${ip}..."
-        done
-        echo "  ${ip} settled"
-    done
-fi
+if [ "$MEASURE_INCLUDES_FLUSH_SETTLE" = "1" ]; then                                                                                                                             
+      echo "--- Flushing, then settling compaction ---"                                                                                                                           
+      for node in "${BD_NODES[@]}"; do ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool flush" & done                                                                      
+      wait                                                                                                                                                                        
+      wait_for_compaction_settle                                                                                  
+  fi 
 
 # 4) AFTER: snapshot counters + collect breakdown
 snapshot_memstat   "after" "${OUT_DIR}/memstat_after.txt"

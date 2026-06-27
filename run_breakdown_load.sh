@@ -32,7 +32,7 @@ YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
 
 FIELD_LENGTH=10000
-RECORD_COUNT=700000
+RECORD_COUNT=500000
 COMPRESSION="on"
 
 NUM_NODES=5
@@ -46,7 +46,7 @@ DATA_DEV=dm-0              # /mydata LV (confirmed 253:0)
 # If 1: flush + let compaction settle BEFORE the AFTER snapshot, so residual
 # memtables and in-flight compaction land inside the measured window (complete
 # write-amp). If 0 (default): snapshot the instant `ycsb load` returns.
-MEASURE_INCLUDES_FLUSH_SETTLE=0
+MEASURE_INCLUDES_FLUSH_SETTLE=1
 
 # =============================================================================
 # HARD restart: wipe data, then start each node UNDER the X GB cgroup cap.

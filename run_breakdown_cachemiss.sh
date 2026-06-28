@@ -43,18 +43,11 @@ CGROUP=/sys/fs/cgroup/mylimitedgroup
 DATA_DEV=dm-0              # /mydata LV (confirmed 253:0)
 
 # Disable autocompaction during measure so dm-0 reads = read-path misses only.
+#   =1 -> original simple cache-miss measurement (no extra metrics).
+#   =0 -> compaction ON: settle before, run 50/50, settle after, and measure
+#         everything (tablestats + compaction history) in addition to the miss
+#         counters. The new metrics are collected ONLY in this mode.
 DISABLE_COMPACTION_DURING_MEASURE=1
-
-# After the MEASURE window, optionally flush + wait for compaction to FULLY
-# settle, then collect compaction/tablestats. Note: disableautocompaction stops
-# COMPACTION but not FLUSHING, so the 50/50 UPDATEs still pile up un-merged
-# SSTables during the window; re-enabling autocompaction then compacts that
-# backlog. This flag waits for that DEFERRED compaction, which is the only way
-# to get a meaningful compaction delta. With it =0, the backlog hasn't run yet,
-# so compaction numbers would be partial/~0 -- so compaction is collected ONLY
-# when this is 1. The cache-miss diskstats/memstat "after" snapshot is taken
-# BEFORE this wait, so the settle's compaction I/O never pollutes the miss bytes.
-WAIT_COMPACTION_AFTER_MEASURE=1
 
 # =============================================================================
 # Wait for REAL compaction settlement on every node:
@@ -305,72 +298,103 @@ $YCSB_DIR run $DB -threads $THREADS \
     -P commonworkload -s >> "$LOG" 2>&1
 echo "--- Warmup done ---"
 
-# 3) MEASURE window
+# =============================================================================
+# 3) MEASURE window. Two modes, driven entirely by DISABLE_COMPACTION_DURING_MEASURE:
+#
+#   DISABLE=1  -> ORIGINAL behavior: compaction off, clean dm-0 read-miss only.
+#                 No tablestats, no compaction history, no settle waits.
+#
+#   DISABLE=0  -> compaction ON: settle before -> reset/baseline -> 50/50 ->
+#                 settle after -> measure everything (snapshots + breakdown +
+#                 tablestats + compaction). dm-0 read delta here includes
+#                 compaction reads (by design, since compaction is on).
+# =============================================================================
 if [ "$DISABLE_COMPACTION_DURING_MEASURE" = "1" ]; then
+    # ----- MODE: compaction disabled (original, simple) -----
     echo "--- Disabling autocompaction (clean dm-0 reads) ---"
     for node in "${BD_NODES[@]}"; do
         ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool disableautocompaction"
     done
-fi
 
-echo "--- Reset breakdown + baseline compaction/tablestats (BEFORE 50/50) ---"
-for node in "${BD_NODES[@]}"; do
-    ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset"
-done
-# Baseline the new metrics BEFORE the window. Done first so any minor metadata
-# reads they trigger are not counted in the cache-miss diskstats snapshot, which
-# is taken last, immediately before MEASURE.
-collect_tablestats "${OUT_DIR}/tablestats_before.txt"
-if [ "$WAIT_COMPACTION_AFTER_MEASURE" = "1" ]; then
-    collect_compaction "${OUT_DIR}/compaction_before.txt"
-fi
-snapshot_memstat   "before" "${OUT_DIR}/memstat_before.txt"
-snapshot_diskstats          "${OUT_DIR}/diskstats_before.txt"
+    echo "--- Reset breakdown + snapshot counters (BEFORE) ---"
+    for node in "${BD_NODES[@]}"; do
+        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset"
+    done
+    snapshot_memstat   "before" "${OUT_DIR}/memstat_before.txt"
+    snapshot_diskstats          "${OUT_DIR}/diskstats_before.txt"
 
-echo "=== MEASURE: 50/50 ${REQUEST_DIST} | ${MEASURE_OPS} ops ==="
-$YCSB_DIR run $DB -threads $THREADS \
-    -p operationcount=$MEASURE_OPS \
-    -p readproportion=${READ_PROP} -p updateproportion=${UPDATE_PROP} \
-    -p insertproportion=0.0 -p scanproportion=0.0 \
-    -p requestdistribution=${REQUEST_DIST} \
-    -p recordcount=${RECORD_COUNT} -p fieldlength=${FIELD_LENGTH} \
-    -p measurement.raw.output_file="${OUT_DIR}/Measure.scr" \
-    -p cassandra.writeconsistencylevel=QUORUM -p cassandra.readconsistencylevel=QUORUM \
-    -P commonworkload -s >> "$LOG" 2>&1
-echo "=== MEASURE done ==="
+    echo "=== MEASURE: 50/50 ${REQUEST_DIST} | ${MEASURE_OPS} ops ==="
+    $YCSB_DIR run $DB -threads $THREADS \
+        -p operationcount=$MEASURE_OPS \
+        -p readproportion=${READ_PROP} -p updateproportion=${UPDATE_PROP} \
+        -p insertproportion=0.0 -p scanproportion=0.0 \
+        -p requestdistribution=${REQUEST_DIST} \
+        -p recordcount=${RECORD_COUNT} -p fieldlength=${FIELD_LENGTH} \
+        -p measurement.raw.output_file="${OUT_DIR}/Measure.scr" \
+        -p cassandra.writeconsistencylevel=QUORUM -p cassandra.readconsistencylevel=QUORUM \
+        -P commonworkload -s >> "$LOG" 2>&1
+    echo "=== MEASURE done ==="
 
-snapshot_memstat   "after" "${OUT_DIR}/memstat_after.txt"
-snapshot_diskstats         "${OUT_DIR}/diskstats_after.txt"
+    snapshot_memstat   "after" "${OUT_DIR}/memstat_after.txt"
+    snapshot_diskstats         "${OUT_DIR}/diskstats_after.txt"
 
-echo "--- Collecting breakdown (ycsb/keyspace lines only) ---"
-echo "run ${EXP_LABEL} ${CACHE_SIZE} 50-50 ${REQUEST_DIST} compr=${COMPRESSION}" >> "$BREAKDOWN_FILE"
-for node in "${BD_NODES[@]}"; do
-    echo "-- node 10.10.1.$node --" >> "$BREAKDOWN_FILE"
-    ssh ${SSH_USER}@10.10.1.$node \
-        "${CASS_DIR}/bin/nodetool breakdown | grep -E 'keyspace|ycsb'" >> "$BREAKDOWN_FILE"
-done
+    echo "--- Collecting breakdown (ycsb/keyspace lines only) ---"
+    echo "run ${EXP_LABEL} ${CACHE_SIZE} 50-50 ${REQUEST_DIST} compr=${COMPRESSION}" >> "$BREAKDOWN_FILE"
+    for node in "${BD_NODES[@]}"; do
+        echo "-- node 10.10.1.$node --" >> "$BREAKDOWN_FILE"
+        ssh ${SSH_USER}@10.10.1.$node \
+            "${CASS_DIR}/bin/nodetool breakdown | grep -E 'keyspace|ycsb'" >> "$BREAKDOWN_FILE"
+    done
 
-if [ "$DISABLE_COMPACTION_DURING_MEASURE" = "1" ]; then
     echo "--- Re-enabling autocompaction ---"
     for node in "${BD_NODES[@]}"; do
         ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool enableautocompaction"
     done
-fi
 
-# Optional: flush + let the deferred 50/50 compaction fully settle, THEN collect
-# the AFTER metrics. The cache-miss after-snapshot above already closed the miss
-# window, so this compaction I/O does not affect the miss measurement.
-if [ "$WAIT_COMPACTION_AFTER_MEASURE" = "1" ]; then
-    echo "--- Flushing, then settling compaction (post-MEASURE) ---"
+else
+    # ----- MODE: compaction enabled (full instrumentation) -----
+    echo "--- Settle compaction BEFORE 50/50 (clean baseline) ---"
+    wait_for_compaction_settle
+
+    echo "--- Reset breakdown + baseline snapshots/tablestats/compaction (BEFORE 50/50) ---"
+    for node in "${BD_NODES[@]}"; do
+        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset"
+    done
+    collect_tablestats "${OUT_DIR}/tablestats_before.txt"
+    collect_compaction "${OUT_DIR}/compaction_before.txt"
+    snapshot_memstat   "before" "${OUT_DIR}/memstat_before.txt"
+    snapshot_diskstats          "${OUT_DIR}/diskstats_before.txt"
+
+    echo "=== MEASURE: 50/50 ${REQUEST_DIST} | ${MEASURE_OPS} ops (compaction ON) ==="
+    $YCSB_DIR run $DB -threads $THREADS \
+        -p operationcount=$MEASURE_OPS \
+        -p readproportion=${READ_PROP} -p updateproportion=${UPDATE_PROP} \
+        -p insertproportion=0.0 -p scanproportion=0.0 \
+        -p requestdistribution=${REQUEST_DIST} \
+        -p recordcount=${RECORD_COUNT} -p fieldlength=${FIELD_LENGTH} \
+        -p measurement.raw.output_file="${OUT_DIR}/Measure.scr" \
+        -p cassandra.writeconsistencylevel=QUORUM -p cassandra.readconsistencylevel=QUORUM \
+        -P commonworkload -s >> "$LOG" 2>&1
+    echo "=== MEASURE done ==="
+
+    echo "--- Flush + settle compaction AFTER 50/50 ---"
     for node in "${BD_NODES[@]}"; do ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool flush" & done
     wait
     wait_for_compaction_settle
-fi
 
-echo "--- Collecting tablestats (AFTER 50/50) ---"
-collect_tablestats "${OUT_DIR}/tablestats_after.txt"
-if [ "$WAIT_COMPACTION_AFTER_MEASURE" = "1" ]; then
-    echo "--- Collecting compaction history (AFTER settle) ---"
+    snapshot_memstat   "after" "${OUT_DIR}/memstat_after.txt"
+    snapshot_diskstats         "${OUT_DIR}/diskstats_after.txt"
+
+    echo "--- Collecting breakdown (ycsb/keyspace lines only) ---"
+    echo "run ${EXP_LABEL} ${CACHE_SIZE} 50-50 ${REQUEST_DIST} compr=${COMPRESSION}" >> "$BREAKDOWN_FILE"
+    for node in "${BD_NODES[@]}"; do
+        echo "-- node 10.10.1.$node --" >> "$BREAKDOWN_FILE"
+        ssh ${SSH_USER}@10.10.1.$node \
+            "${CASS_DIR}/bin/nodetool breakdown | grep -E 'keyspace|ycsb'" >> "$BREAKDOWN_FILE"
+    done
+
+    echo "--- Collecting tablestats + compaction (AFTER settle) ---"
+    collect_tablestats "${OUT_DIR}/tablestats_after.txt"
     collect_compaction "${OUT_DIR}/compaction_after.txt"
 fi
 
@@ -490,9 +514,8 @@ with open(summary, "w") as out:
         out.write(f"TOTAL ycsb compactions(+) : {tot_cnt}\n")
         out.write(f"TOTAL bytes_in(+)         : {tot_ci/(1024**2):.1f} MB ({tot_ci/(1024**3):.2f} GiB)\n")
         out.write(f"TOTAL bytes_out(+)        : {tot_co/(1024**2):.1f} MB ({tot_co/(1024**3):.2f} GiB)\n")
-        out.write("  Compaction is disabled DURING measure; this delta is the deferred\n")
-        out.write("  compaction from the 50/50 UPDATEs, realized during the post-measure\n")
-        out.write("  settle (WAIT_COMPACTION_AFTER_MEASURE=1). With it =0, expect ~0 here.\n")
+        out.write("  Measured with compaction ON: settle-before -> 50/50 -> settle-after.\n")
+        out.write("  This delta is the compaction the 50/50 UPDATE traffic generated.\n")
 
 print(open(summary).read())
 PYEOF

@@ -45,6 +45,64 @@ DATA_DEV=dm-0              # /mydata LV (confirmed 253:0)
 # Disable autocompaction during measure so dm-0 reads = read-path misses only.
 DISABLE_COMPACTION_DURING_MEASURE=1
 
+# After the MEASURE window, optionally flush + wait for compaction to FULLY
+# settle, then collect compaction/tablestats. Note: disableautocompaction stops
+# COMPACTION but not FLUSHING, so the 50/50 UPDATEs still pile up un-merged
+# SSTables during the window; re-enabling autocompaction then compacts that
+# backlog. This flag waits for that DEFERRED compaction, which is the only way
+# to get a meaningful compaction delta. With it =0, the backlog hasn't run yet,
+# so compaction numbers would be partial/~0 -- so compaction is collected ONLY
+# when this is 1. The cache-miss diskstats/memstat "after" snapshot is taken
+# BEFORE this wait, so the settle's compaction I/O never pollutes the miss bytes.
+WAIT_COMPACTION_AFTER_MEASURE=1
+
+# =============================================================================
+# Wait for REAL compaction settlement on every node:
+#   pending tasks == 0  AND  ycsb compaction count unchanged,
+#   sustained for STABLE_NEEDED consecutive polls (defeats momentary lulls).
+wait_for_compaction_settle() {
+    local poll=30 stable_needed=3
+    echo "--- Waiting for real compaction settlement ---"
+    for node in "${BD_NODES[@]}"; do
+        local ip="10.10.1.$node" stable=0 prev=-1
+        while [ "$stable" -lt "$stable_needed" ]; do
+            local pending hist
+            pending=$(ssh ${SSH_USER}@${ip} "${CASS_DIR}/bin/nodetool compactionstats 2>/dev/null | awk '/pending tasks/{print \$NF}'")
+            hist=$(ssh ${SSH_USER}@${ip} "${CASS_DIR}/bin/nodetool compactionhistory 2>/dev/null | awk '\$2==\"ycsb\"' | wc -l")
+            pending=${pending:-1}
+            if [ "$pending" = "0" ] && [ "$hist" = "$prev" ]; then stable=$((stable+1)); else stable=0; fi
+            prev="$hist"
+            echo "  ${ip}: pending=${pending} ycsb_compactions=${hist} stable=${stable}/${stable_needed}"
+            [ "$stable" -lt "$stable_needed" ] && sleep "$poll"
+        done
+        echo "  ${ip} settled (ycsb compactions=${prev})"
+    done
+}
+
+# Per-node ycsb compaction-history summary (bytes_in/out/count). Same one-liner
+# as the load script; used for BEFORE/AFTER baselining of the 50/50 window.
+collect_compaction() {
+    local outfile=$1
+    : > "$outfile"
+    for node in "${BD_NODES[@]}"; do
+        echo "-- node 10.10.1.$node --" >> "$outfile"
+        ssh ${SSH_USER}@10.10.1.$node \
+            "${CASS_DIR}/bin/nodetool compactionhistory | awk '\$2==\"ycsb\"{i+=\$5; o+=\$6; k++} END{printf \"ycsb,CompactionHistory,bytes_in=%d,bytes_out=%d,out_gb=%.3f,count=%d\\n\", i+0, o+0, (o+0)/1e9, k+0}'" >> "$outfile"
+    done
+}
+
+# Per-node nodetool tablestats for ycsb.usertable.
+collect_tablestats() {
+    local outfile=$1
+    : > "$outfile"
+    for node in "${BD_NODES[@]}"; do
+        echo "===== node 10.10.1.$node =====" >> "$outfile"
+        ssh ${SSH_USER}@10.10.1.$node \
+            "${CASS_DIR}/bin/nodetool tablestats ycsb.usertable" >> "$outfile" 2>&1
+        echo "" >> "$outfile"
+    done
+}
+
 # =============================================================================
 stop_cluster() {
     echo ""; echo "=== Stopping Cassandra on all nodes ==="
@@ -255,10 +313,17 @@ if [ "$DISABLE_COMPACTION_DURING_MEASURE" = "1" ]; then
     done
 fi
 
-echo "--- Reset breakdown + snapshot counters (BEFORE) ---"
+echo "--- Reset breakdown + baseline compaction/tablestats (BEFORE 50/50) ---"
 for node in "${BD_NODES[@]}"; do
     ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset"
 done
+# Baseline the new metrics BEFORE the window. Done first so any minor metadata
+# reads they trigger are not counted in the cache-miss diskstats snapshot, which
+# is taken last, immediately before MEASURE.
+collect_tablestats "${OUT_DIR}/tablestats_before.txt"
+if [ "$WAIT_COMPACTION_AFTER_MEASURE" = "1" ]; then
+    collect_compaction "${OUT_DIR}/compaction_before.txt"
+fi
 snapshot_memstat   "before" "${OUT_DIR}/memstat_before.txt"
 snapshot_diskstats          "${OUT_DIR}/diskstats_before.txt"
 
@@ -286,9 +351,27 @@ for node in "${BD_NODES[@]}"; do
 done
 
 if [ "$DISABLE_COMPACTION_DURING_MEASURE" = "1" ]; then
+    echo "--- Re-enabling autocompaction ---"
     for node in "${BD_NODES[@]}"; do
         ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool enableautocompaction"
     done
+fi
+
+# Optional: flush + let the deferred 50/50 compaction fully settle, THEN collect
+# the AFTER metrics. The cache-miss after-snapshot above already closed the miss
+# window, so this compaction I/O does not affect the miss measurement.
+if [ "$WAIT_COMPACTION_AFTER_MEASURE" = "1" ]; then
+    echo "--- Flushing, then settling compaction (post-MEASURE) ---"
+    for node in "${BD_NODES[@]}"; do ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool flush" & done
+    wait
+    wait_for_compaction_settle
+fi
+
+echo "--- Collecting tablestats (AFTER 50/50) ---"
+collect_tablestats "${OUT_DIR}/tablestats_after.txt"
+if [ "$WAIT_COMPACTION_AFTER_MEASURE" = "1" ]; then
+    echo "--- Collecting compaction history (AFTER settle) ---"
+    collect_compaction "${OUT_DIR}/compaction_after.txt"
 fi
 
 # 4) Parse: dm-0 miss bytes (primary) + memcg refault/majfault (corroboration)
@@ -356,6 +439,37 @@ for node in sorted(set(db) & set(da)):
 per_op   = tot_miss / read_ops if read_ops else float('nan')
 hit_rate = (1.0 - tot_miss / served) * 100.0 if served else float('nan')
 
+# --- compaction generated by the 50/50 window (after - before) ---------------
+def parse_compaction(path):
+    d, node = {}, None
+    if not os.path.exists(path):
+        return d
+    with open(path) as f:
+        for line in f:
+            m = re.search(r'-- node 10\.10\.1\.(\d+) --', line)
+            if m:
+                node = "node" + m.group(1); continue
+            if node and 'CompactionHistory' in line:
+                bi = re.search(r'bytes_in=(\d+)', line)
+                bo = re.search(r'bytes_out=(\d+)', line)
+                c  = re.search(r'count=(\d+)', line)
+                d[node] = (int(bi.group(1)) if bi else 0,
+                           int(bo.group(1)) if bo else 0,
+                           int(c.group(1))  if c  else 0)
+    return d
+
+cb = parse_compaction(os.path.join(outdir, "compaction_before.txt"))
+ca = parse_compaction(os.path.join(outdir, "compaction_after.txt"))
+comp_lines, tot_ci, tot_co, tot_cnt = [], 0, 0, 0
+for node in sorted(set(cb) | set(ca)):
+    bi0, bo0, c0 = cb.get(node, (0, 0, 0))
+    bi1, bo1, c1 = ca.get(node, (0, 0, 0))
+    dci, dco, dcnt = bi1 - bi0, bo1 - bo0, c1 - c0
+    tot_ci += dci; tot_co += dco; tot_cnt += dcnt
+    comp_lines.append(
+        f"{node}: ycsb_compactions(+)={dcnt:>5}  "
+        f"bytes_in(+)={dci/(1024**2):9.1f}MB  bytes_out(+)={dco/(1024**2):9.1f}MB")
+
 with open(summary, "w") as out:
     out.write("=== Cassandra read-path MISS (dm-0 diskstats primary) ===\n")
     out.write(f"system={sys_kind}  nodes=5  read_ops={read_ops}  object={field_len}B\n\n")
@@ -370,15 +484,27 @@ with open(summary, "w") as out:
               "  and refault(+), which are model-free. For a sharp %, set readahead low:\n"
               "    sudo blockdev --setra 16 /dev/mapper/emulab-node1--bs\n")
 
+    if comp_lines:
+        out.write("\n=== Compaction from the 50/50 window (delta: after - before) ===\n")
+        out.write("\n".join(comp_lines) + "\n")
+        out.write(f"TOTAL ycsb compactions(+) : {tot_cnt}\n")
+        out.write(f"TOTAL bytes_in(+)         : {tot_ci/(1024**2):.1f} MB ({tot_ci/(1024**3):.2f} GiB)\n")
+        out.write(f"TOTAL bytes_out(+)        : {tot_co/(1024**2):.1f} MB ({tot_co/(1024**3):.2f} GiB)\n")
+        out.write("  Compaction is disabled DURING measure; this delta is the deferred\n")
+        out.write("  compaction from the 50/50 UPDATEs, realized during the post-measure\n")
+        out.write("  settle (WAIT_COMPACTION_AFTER_MEASURE=1). With it =0, expect ~0 here.\n")
+
 print(open(summary).read())
 PYEOF
 
 echo ""
 echo "############################################################"
 echo "Done. ${OUT_DIR}/"
-echo "  breakdown.txt            ycsb/keyspace component lines, per node"
-echo "  cachemiss_summary.txt    miss MB + B/op + refault + derived %"
-echo "  diskstats_before/after   dm-0 raw (primary)"
-echo "  memstat_before/after     memcg raw (corroboration)"
-echo "  Measure.scr              YCSB latency raw"
+echo "  breakdown.txt              ycsb/keyspace component lines, per node"
+echo "  cachemiss_summary.txt      miss MB + B/op + refault + derived % + compaction delta"
+echo "  tablestats_before/after    nodetool tablestats ycsb.usertable (50/50 window)"
+echo "  compaction_before/after    ycsb compactionhistory summary (50/50 window)"
+echo "  diskstats_before/after     dm-0 raw (primary)"
+echo "  memstat_before/after       memcg raw (corroboration)"
+echo "  Measure.scr                YCSB latency raw"
 echo "############################################################"

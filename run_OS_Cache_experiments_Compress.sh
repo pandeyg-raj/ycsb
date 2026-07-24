@@ -324,7 +324,8 @@ read THREADS
 #     delete_snapshot
 #   Between on/off: hard_restart of next iteration wipes everything clean
 # =============================================================================
-for COMPRESSION in "on" "off"; do
+#for COMPRESSION in "on" "off"; do
+for COMPRESSION in "on"; do
 
     # Set correct binary for this compression state
     if echo "$EXP_LABEL" | grep -qi "rep"; then

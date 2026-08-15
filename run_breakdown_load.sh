@@ -33,6 +33,7 @@ DB=cassandra-cql
 
 FIELD_LENGTH=10000
 RECORD_COUNT=5000000
+MEASURE_OPS=10000000       # read-phase operationcount (100% read workload)
 COMPRESSION="on"
 
 NUM_NODES=5
@@ -250,7 +251,6 @@ echo "Is this EC or REP?"; read EXP_LABEL
 read -p "Cassandra memory cap in GB (e.g. 32): " CACHE_GB
 read -p "Load (insert) threads: " WTHREADS
 read -p "Read (run) threads: " RTHREADS
-read -p "Read operationcount (e.g. 2000000): " OP_COUNT
 
 CACHE_SIZE="${CACHE_GB}GB"
 
@@ -582,9 +582,9 @@ if [ "$DROP_CACHES_BEFORE_READ" = "1" ]; then
 fi
 
 # ---- PHASE 2: 100% read (uniform), same cluster/data ----
-run_phase read "$OP_COUNT" read \
+run_phase read "$MEASURE_OPS" read \
     $YCSB_DIR run $DB -threads $RTHREADS \
-        -p recordcount=${RECORD_COUNT} -p operationcount=${OP_COUNT} \
+        -p recordcount=${RECORD_COUNT} -p operationcount=${MEASURE_OPS} \
         -p fieldlength=${FIELD_LENGTH} \
         -p readproportion=1 -p updateproportion=0 -p scanproportion=0 -p insertproportion=0 \
         -p requestdistribution=${READ_DIST} \

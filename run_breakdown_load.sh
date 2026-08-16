@@ -69,6 +69,17 @@ STORAGE_PORTS="7000 7001"          # Cassandra inter-node (storage_port + SSL)
 READ_DIST="uniform"                # request distribution for the 100% read phase
 DROP_CACHES_BEFORE_READ=0          # 1 => drop page cache before read (cold, disk-bound)
 
+# -- During-workload sampling (evidence for WHY one system is faster) ----------
+# Device %util over time is the smoking gun: if REP saturates dm-0 (~100%) while
+# EC has headroom, that IS why EC's write throughput is higher despite more work.
+MEASURE_DISK_TIMESERIES=1          # sample /proc/diskstats during each phase (cheap, no JVM)
+SAMPLE_SEC=5                       # sampling interval (seconds)
+# Cassandra-side backpressure (pending compactions / blocked flush writers) is the
+# mechanism translating disk saturation into throttled client writes. Uses nodetool
+# (JVM cost per sample) -> run it in a SEPARATE confirmatory trial, not the one you
+# quote CPU numbers from, since the JVM sampling perturbs CPU.
+MEASURE_CASSANDRA_BACKPRESSURE=0   # 1 => also sample nodetool tpstats/compactionstats
+
 # Wait for REAL compaction settlement on every node:                                                                                                                            
   #   pending tasks == 0  AND  ycsb compaction count unchanged,                                                                                                                   
   #   sustained for STABLE_NEEDED consecutive polls (defeats momentary lulls).                                                                                                    
@@ -272,6 +283,59 @@ echo ">>> metrics: ${DATA_DEV} diskstats + memcg + cgroup cpu.stat + /proc/net/d
 echo "################################################################"
 
 # =============================================================================
+# Per-phase compaction snapshot (before/after -> delta), so compaction bytes are
+# PER PHASE. compactionhistory is cumulative and non-resettable, so the only way
+# to isolate a phase's compaction is to diff the summed bytes across the window.
+# =============================================================================
+snapshot_compaction() {
+    local outfile=$1
+    : > "$outfile"
+    for node in "${BD_NODES[@]}"; do
+        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool compactionhistory 2>/dev/null | awk '\$2==\"ycsb\"{i+=\$5; o+=\$6} END{printf \"node%s bytes_in=%d bytes_out=%d\\n\", \"${node}\", i+0, o+0}'" >> "$outfile"
+    done
+}
+
+# =============================================================================
+# Time-series samplers (background). Device %util answers "why is X faster";
+# backpressure (opt-in) shows the flush/compaction queue building under load.
+# =============================================================================
+start_samplers() {
+    local pdir=$1
+    SAMPLER_STOP="${pdir}/.stop_sampler"; rm -f "$SAMPLER_STOP"
+    SAMPLER_PIDS=()
+    if [ "$MEASURE_DISK_TIMESERIES" = "1" ]; then
+        : > "${pdir}/diskutil_timeseries.txt"
+        ( while [ ! -f "$SAMPLER_STOP" ]; do
+            ts=$(date +%s)
+            for node in "${BD_NODES[@]}"; do
+                line=$(ssh ${SSH_USER}@10.10.1.$node "grep -w ${DATA_DEV} /proc/diskstats | head -1" 2>/dev/null)
+                echo "${ts} node${node} ${line}"
+            done >> "${pdir}/diskutil_timeseries.txt"
+            sleep "${SAMPLE_SEC}"
+          done ) &
+        SAMPLER_PIDS+=($!)
+    fi
+    if [ "$MEASURE_CASSANDRA_BACKPRESSURE" = "1" ]; then
+        : > "${pdir}/backpressure_timeseries.txt"
+        ( while [ ! -f "$SAMPLER_STOP" ]; do
+            ts=$(date +%s)
+            for node in "${BD_NODES[@]}"; do
+                pend=$(ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool compactionstats 2>/dev/null | awk '/pending tasks/{print \$NF}'")
+                tp=$(ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool tpstats 2>/dev/null | awk '/CompactionExecutor|MemtableFlushWriter|MutationStage/{print \$1\"=pend\"\$3\"/blk\"\$5}' | tr '\n' ' '")
+                echo "${ts} node${node} compaction_pending=${pend:-NA} ${tp}"
+            done >> "${pdir}/backpressure_timeseries.txt"
+            sleep "$((SAMPLE_SEC*2))"
+          done ) &
+        SAMPLER_PIDS+=($!)
+    fi
+}
+stop_samplers() {
+    [ -n "$SAMPLER_STOP" ] && touch "$SAMPLER_STOP"
+    for p in "${SAMPLER_PIDS[@]}"; do wait "$p" 2>/dev/null; done
+    SAMPLER_PIDS=()
+}
+
+# =============================================================================
 # PHASE RUNNER: BEFORE snapshots -> workload -> (load only: flush+settle) ->
 # AFTER snapshots -> collect -> parse into a per-phase resource_summary.txt.
 # Counters are NEVER reset: each phase takes its own before/after pair, so the
@@ -296,12 +360,15 @@ run_phase() {
     # NET snapshotted tightly around the workload (before any flush/settle SSH
     # storm), so /proc/net/dev is not polluted by our own control-plane traffic.
     snapshot_netstat   "before" "${pdir}/netstat_before.txt"
+    snapshot_compaction        "${pdir}/compaction_before.txt"
 
+    start_samplers "$pdir"
     local full_start load_start load_end full_end
     full_start=$(date +%s); load_start=$full_start
     echo "=== ${phase}: running workload ==="
     "$@" >> "${pdir}/run.log" 2>&1
     load_end=$(date +%s)
+    stop_samplers
     snapshot_netstat   "after" "${pdir}/netstat_after.txt"
     echo "=== ${phase}: workload done ==="
 
@@ -311,6 +378,7 @@ run_phase() {
         for node in "${BD_NODES[@]}"; do ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool flush" & done
         wait
         wait_for_compaction_settle
+        echo "--- load compaction settled at epoch $(date +%s) ($(date '+%F %T')) ---"
     fi
 
     snapshot_memstat   "after" "${pdir}/memstat_after.txt"
@@ -333,11 +401,8 @@ run_phase() {
         echo "===== node 10.10.1.$node =====" >> "${pdir}/tablestats.txt"
         ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool tablestats ycsb.usertable" >> "${pdir}/tablestats.txt" 2>&1
     done
-    echo "compaction ${phase} ${CACHE_SIZE} compr=${COMPRESSION}" > "${pdir}/compaction_history.txt"
-    for node in "${BD_NODES[@]}"; do
-        echo "-- node 10.10.1.$node --" >> "${pdir}/compaction_history.txt"
-        ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool compactionhistory | awk '\$2==\"ycsb\"{i+=\$5; o+=\$6; k++} END{printf \"ycsb,CompactionHistory,bytes_in=%d,bytes_out=%d,out_gb=%.3f,count=%d\\n\", i+0, o+0, (o+0)/1e9, k+0}'" >> "${pdir}/compaction_history.txt"
-    done
+    snapshot_compaction "${pdir}/compaction_after.txt"
+    cp "${pdir}/compaction_after.txt" "${pdir}/compaction_history.txt" 2>/dev/null
     echo "space ${phase} ${CACHE_SIZE} compr=${COMPRESSION}" > "${pdir}/space.txt"
     for node in "${BD_NODES[@]}"; do
         b=$(ssh ${SSH_USER}@10.10.1.$node "du -sb ${CASS_DIR}/data 2>/dev/null | awk '{print \$1}'")

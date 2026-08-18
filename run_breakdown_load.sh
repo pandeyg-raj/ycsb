@@ -87,7 +87,9 @@ MEASURE_CASSANDRA_BACKPRESSURE=0   # 1 => also sample nodetool tpstats/compactio
 # NOTE: cachestat is a BPF tracer running ON the measured node, so it adds a small
 # CPU overhead there -- for a CPU-precision run set this to 0; for a cache-focused
 # run (e.g. the resized dataset), leave it on.
-MEASURE_CACHESTAT=1                 # 1 => background cachestat per node -> exact hit ratio
+MEASURE_CACHESTAT=0                 # cachestat-bpfcc gates output on a TTY on these nodes
+                                   # (verified: writes nothing to a file even foreground+stdbuf),
+                                   # so exact hit rate comes from /proc/vmstat instead (always on).
 CACHESTAT_MAXDUR=14400             # hard timeout (s) so a tracer can never orphan
 
 # Wait for REAL compaction settlement on every node:                                                                                                                            
@@ -271,7 +273,15 @@ echo "OK."; echo ""
 echo "Is this EC or REP?"; read EXP_LABEL
 read -p "Cassandra memory cap in GB (e.g. 32): " CACHE_GB
 read -p "Load (insert) threads: " WTHREADS
-read -p "Read (run) threads: " RTHREADS
+read -p "Phase mode -- 1 = load only, 2 = load + read: " PHASE_MODE
+PHASE_MODE="${PHASE_MODE:-2}"
+if [ "$PHASE_MODE" = "1" ]; then
+    RTHREADS=0
+    echo "  -> LOAD-ONLY run (read phase skipped)."
+else
+    PHASE_MODE=2
+    read -p "Read (run) threads: " RTHREADS
+fi
 
 CACHE_SIZE="${CACHE_GB}GB"
 
@@ -346,6 +356,22 @@ stop_samplers() {
 }
 
 # =============================================================================
+# /proc/vmstat snapshot (page-cache miss counters). pgpgin = KB paged in from
+# block devices into the page cache = read-phase cache MISSES. Delta before/after
+# a phase -> miss bytes; combined with requested bytes -> exact-ish hit ratio.
+# No BPF / TTY / root needed (cachestat-bpfcc gates output on a TTY on these nodes).
+# =============================================================================
+snapshot_vmstat() {
+    local tag=$1 outfile=$2
+    : > "$outfile"
+    for node in "${BD_NODES[@]}"; do
+        echo "### node${node} ${tag}" >> "$outfile"
+        ssh ${SSH_USER}@10.10.1.$node \
+            "grep -E '^(pgpgin|pgpgout|pgfault|pgmajfault) ' /proc/vmstat" >> "$outfile"
+    done
+}
+
+# =============================================================================
 # Exact page-cache hit rate via BCC cachestat, launched ON each node for the
 # workload window. timeout() bounds it so a tracer can never orphan; any node
 # without a cachestat binary is skipped (the run continues on the dm-0/refault
@@ -405,6 +431,7 @@ run_phase() {
     # storm), so /proc/net/dev is not polluted by our own control-plane traffic.
     snapshot_netstat   "before" "${pdir}/netstat_before.txt"
     snapshot_compaction        "${pdir}/compaction_before.txt"
+    snapshot_vmstat    "before" "${pdir}/vmstat_before.txt"
 
     start_samplers "$pdir"
     start_cachestat "$pdir"
@@ -416,6 +443,7 @@ run_phase() {
     stop_samplers
     stop_cachestat "$pdir"
     snapshot_netstat   "after" "${pdir}/netstat_after.txt"
+    snapshot_vmstat    "after" "${pdir}/vmstat_after.txt"
     echo "=== ${phase}: workload done ==="
 
     # Only the write phase produces durable state that needs to settle.
@@ -683,6 +711,9 @@ run_phase load "$RECORD_COUNT" insert \
         -p measurement.raw.output_file="${OUT_DIR}/load/Load.scr" \
         -P commonworkload -s
 
+# ---- PHASE 2: 100% read (uniform), same cluster/data -- only when requested ----
+if [ "$PHASE_MODE" = "2" ]; then
+
 # Optional cold-cache read: drop page cache on every node so the read phase is
 # disk-bound instead of steady-state-under-cap. Default OFF (steady state).
 if [ "$DROP_CACHES_BEFORE_READ" = "1" ]; then
@@ -692,7 +723,6 @@ if [ "$DROP_CACHES_BEFORE_READ" = "1" ]; then
     done
 fi
 
-# ---- PHASE 2: 100% read (uniform), same cluster/data ----
 run_phase read "$MEASURE_OPS" read \
     $YCSB_DIR run $DB -threads $RTHREADS \
         -p recordcount=${RECORD_COUNT} -p operationcount=${MEASURE_OPS} \
@@ -702,15 +732,27 @@ run_phase read "$MEASURE_OPS" read \
         -p measurement.raw.output_file="${OUT_DIR}/read/Read.scr" \
         -P commonworkload -s
 
+else
+    echo ""
+    echo "--- PHASE_MODE=1: read phase skipped (load-only run) ---"
+fi
+
 echo ""
 echo "############################################################"
-echo "Done. ${OUT_DIR}/"
+echo "Done (PHASE_MODE=${PHASE_MODE}: $([ "$PHASE_MODE" = "1" ] && echo 'load only' || echo 'load + read')). ${OUT_DIR}/"
 echo "  load/resource_summary.txt   WRITE phase: disk/cpu/net/footprint + write-amp"
+if [ "$PHASE_MODE" = "2" ]; then
 echo "  read/resource_summary.txt   READ  phase: disk/cpu/net + read B/op + faults"
+fi
 echo "  <phase>/Load.scr | Read.scr YCSB latency raw"
-echo "  <phase>/{diskstats,memstat,cpustat,netstat}_before/after  raw counters"
+echo "  <phase>/{diskstats,memstat,cpustat,netstat,vmstat}_before/after  raw counters"
 echo "  <phase>/{breakdown,tablestats,compaction_history,space,timings}.txt"
 echo "  <phase>/run.log             YCSB stdout/stderr"
 echo ""
+if [ "$PHASE_MODE" = "1" ]; then
+echo "  Load-only: verify the write-decomposition model against load/breakdown.txt"
+echo "  and reconcile_compaction.py (commitlog/flush/compaction vs dm-0)."
+else
 echo "  Compare write-vs-read: diff load/resource_summary.txt read/resource_summary.txt"
+fi
 echo "############################################################"

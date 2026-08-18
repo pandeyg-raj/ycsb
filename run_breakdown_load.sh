@@ -62,7 +62,10 @@ NET_IFACE=""                       # e.g. "eno1"/"eth1"; empty => auto-detect pe
 # an EC-vs-REP network comparison, but it installs a firewall table on every node.
 # Default OFF: verify `sudo nft list table inet least_meter` on one node before
 # trusting it. /proc/net/dev totals are always captured regardless.
-MEASURE_NET_PORTS=0                 # 1 => also install+read nft counters
+MEASURE_NETWORK=0                  # master switch: 0 => skip ALL network measurement
+                                   # (set by the startup prompt). When 0, neither the
+                                   # /proc/net/dev snapshots nor the nft meter run.
+MEASURE_NET_PORTS=0                 # 1 => also install+read nft counters (only if MEASURE_NETWORK=1)
 STORAGE_PORTS="7000 7001"          # Cassandra inter-node (storage_port + SSL)
 
 # -- Read phase ---------------------------------------------------------------
@@ -239,7 +242,7 @@ snapshot_netstat() {
 # (policy accept, never drops). Its own table => does not touch existing firewall
 # rules. The table/delete/table idiom resets counters idempotently on each run.
 install_net_meter() {
-    [ "$MEASURE_NET_PORTS" != "1" ] && return 0
+    { [ "$MEASURE_NETWORK" != "1" ] || [ "$MEASURE_NET_PORTS" != "1" ]; } && return 0
     local ports="${STORAGE_PORTS// /, }"
     echo "--- Installing nft inter-node byte meter (ports ${ports}) ---"
     for node in "${BD_NODES[@]}"; do
@@ -282,6 +285,9 @@ else
     PHASE_MODE=2
     read -p "Read (run) threads: " RTHREADS
 fi
+read -p "Measure network? 1 = yes, 0 = no (skip all network measurement): " MEASURE_NETWORK
+MEASURE_NETWORK="${MEASURE_NETWORK:-0}"
+[ "$MEASURE_NETWORK" = "1" ] || { MEASURE_NETWORK=0; MEASURE_NET_PORTS=0; echo "  -> network measurement OFF."; }
 
 CACHE_SIZE="${CACHE_GB}GB"
 
@@ -429,7 +435,7 @@ run_phase() {
     snapshot_cpustat   "before" "${pdir}/cpustat_before.txt"
     # NET snapshotted tightly around the workload (before any flush/settle SSH
     # storm), so /proc/net/dev is not polluted by our own control-plane traffic.
-    snapshot_netstat   "before" "${pdir}/netstat_before.txt"
+    [ "$MEASURE_NETWORK" = "1" ] && snapshot_netstat "before" "${pdir}/netstat_before.txt"
     snapshot_compaction        "${pdir}/compaction_before.txt"
     snapshot_vmstat    "before" "${pdir}/vmstat_before.txt"
 
@@ -442,7 +448,7 @@ run_phase() {
     load_end=$(date +%s)
     stop_samplers
     stop_cachestat "$pdir"
-    snapshot_netstat   "after" "${pdir}/netstat_after.txt"
+    [ "$MEASURE_NETWORK" = "1" ] && snapshot_netstat "after" "${pdir}/netstat_after.txt"
     snapshot_vmstat    "after" "${pdir}/vmstat_after.txt"
     echo "=== ${phase}: workload done ==="
 
@@ -701,8 +707,59 @@ PYEOF
 # MAIN: fresh cluster, then PHASE 1 (100% load) and PHASE 2 (100% read) on the
 # SAME cluster/data -- no restart between phases.
 # =============================================================================
+
+# Cleanup trap: if the script exits for ANY reason (Ctrl-C, kill, error, normal
+# end), stop the background samplers/tracers so they can't orphan and spam the
+# shell or steal CPU on a node. Safe to call even if nothing was started.
+cleanup() {
+    trap - EXIT INT TERM
+    echo ""; echo "--- cleanup: stopping samplers/tracers ---"
+    stop_samplers 2>/dev/null
+    for d in "${OUT_DIR}"/load "${OUT_DIR}"/read; do
+        [ -d "$d" ] && stop_cachestat "$d" 2>/dev/null
+    done
+    # belt-and-suspenders: kill any stray background probes on the nodes
+    for node in "${BD_NODES[@]}"; do
+        ssh ${SSH_USER}@10.10.1.$node "sudo pkill -f cachestat 2>/dev/null" 2>/dev/null &
+    done
+    wait 2>/dev/null
+}
+trap cleanup EXIT INT TERM
+
+# Pre-run health gate: refuse to run on a degraded cluster, because a node that
+# is down or dropping mutations silently corrupts the byte counters and latency
+# tails. Aborts if any node is not 'UN', or if any node already shows dropped
+# mutations (a sign of a sick node from a prior run).
+preflight_health() {
+    echo "--- preflight: cluster health ---"
+    local bad=0
+    local st; st="$(${CASS_DIR}/bin/nodetool status 2>/dev/null)"
+    local up; up="$(echo "$st" | grep -cE '^UN')"
+    local notup; notup="$(echo "$st" | grep -E '^(DN|UJ|UL|UM|\?N)')"
+    echo "  nodes UN: ${up}/${NUM_NODES}"
+    if [ "$up" != "$NUM_NODES" ]; then
+        echo "  !! not all nodes UN:"; echo "$notup" | sed 's/^/     /'; bad=1
+    fi
+    for node in "${BD_NODES[@]}"; do
+        local dropped
+        dropped="$(ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool tpstats 2>/dev/null | awk '/^Dropped/{f=1;next} f&&\$2+0>0{print \$1\"=\"\$2}'" 2>/dev/null)"
+        if [ -n "$dropped" ]; then
+            echo "  !! node ${node} has dropped messages: ${dropped}"; bad=1
+        fi
+    done
+    if [ "$bad" = "1" ]; then
+        echo ""
+        echo "  ABORTING: cluster is degraded (see above). Fix the node(s) first --"
+        echo "  a run on a dropping/down cluster produces corrupt counters and tails."
+        echo "  (To bypass for a deliberate fault-injection run, comment out preflight_health.)"
+        exit 1
+    fi
+    echo "  cluster healthy."
+}
+
 hard_restart_cluster "$CACHE_SIZE"
-install_net_meter            # no-op unless MEASURE_NET_PORTS=1
+preflight_health
+install_net_meter            # no-op unless MEASURE_NETWORK=1 and MEASURE_NET_PORTS=1
 
 # ---- PHASE 1: 100% write ----
 run_phase load "$RECORD_COUNT" insert \

@@ -80,6 +80,16 @@ SAMPLE_SEC=5                       # sampling interval (seconds)
 # quote CPU numbers from, since the JVM sampling perturbs CPU.
 MEASURE_CASSANDRA_BACKPRESSURE=0   # 1 => also sample nodetool tpstats/compactionstats
 
+# -- Exact page-cache hit rate (read phase) -----------------------------------
+# The refault/dm-0 numbers give a miss PROXY. For the exact per-access hit ratio,
+# run BCC 'cachestat' on each node during the workload (kernel-level HITS/MISSES).
+# Needs bcc-tools + root on the nodes; auto-skips any node where it's absent.
+# NOTE: cachestat is a BPF tracer running ON the measured node, so it adds a small
+# CPU overhead there -- for a CPU-precision run set this to 0; for a cache-focused
+# run (e.g. the resized dataset), leave it on.
+MEASURE_CACHESTAT=1                 # 1 => background cachestat per node -> exact hit ratio
+CACHESTAT_MAXDUR=14400             # hard timeout (s) so a tracer can never orphan
+
 # Wait for REAL compaction settlement on every node:                                                                                                                            
   #   pending tasks == 0  AND  ycsb compaction count unchanged,                                                                                                                   
   #   sustained for STABLE_NEEDED consecutive polls (defeats momentary lulls).                                                                                                    
@@ -336,6 +346,40 @@ stop_samplers() {
 }
 
 # =============================================================================
+# Exact page-cache hit rate via BCC cachestat, launched ON each node for the
+# workload window. timeout() bounds it so a tracer can never orphan; any node
+# without a cachestat binary is skipped (the run continues on the dm-0/refault
+# proxy). Output per node -> cachestat_node<N>.txt for cache_hit.py.
+# =============================================================================
+start_cachestat() {
+    local pdir=$1
+    [ "$MEASURE_CACHESTAT" != "1" ] && return 0
+    CACHESTAT_PIDFILE="${pdir}/.cachestat_pids"; : > "$CACHESTAT_PIDFILE"
+    for node in "${BD_NODES[@]}"; do
+        local ip="10.10.1.$node" bin pid
+        bin=$(ssh ${SSH_USER}@${ip} "command -v cachestat || command -v cachestat-bpfcc || ls /usr/share/bcc/tools/cachestat 2>/dev/null" 2>/dev/null | head -1)
+        if [ -z "$bin" ]; then
+            echo "  cachestat not found on node ${node} -- skipping (apt install bcc-tools for exact hit rate)"
+            continue
+        fi
+        pid=$(ssh ${SSH_USER}@${ip} "sudo nohup timeout ${CACHESTAT_MAXDUR} ${bin} ${SAMPLE_SEC} > /tmp/cachestat_${node}.out 2>/dev/null & echo \$!")
+        echo "node${node} ${pid}" >> "$CACHESTAT_PIDFILE"
+    done
+}
+stop_cachestat() {
+    local pdir=$1
+    [ "$MEASURE_CACHESTAT" != "1" ] && return 0
+    [ -f "$CACHESTAT_PIDFILE" ] || return 0
+    while read -r node pid; do
+        local n="${node#node}" ip
+        ip="10.10.1.${n}"
+        # kill the timeout wrapper + the cachestat child, then pull the log back
+        ssh ${SSH_USER}@${ip} "sudo kill ${pid} 2>/dev/null; sudo pkill -f cachestat 2>/dev/null" 2>/dev/null
+        ssh ${SSH_USER}@${ip} "cat /tmp/cachestat_${n}.out 2>/dev/null" > "${pdir}/cachestat_${node}.txt" 2>/dev/null
+    done < "$CACHESTAT_PIDFILE"
+}
+
+# =============================================================================
 # PHASE RUNNER: BEFORE snapshots -> workload -> (load only: flush+settle) ->
 # AFTER snapshots -> collect -> parse into a per-phase resource_summary.txt.
 # Counters are NEVER reset: each phase takes its own before/after pair, so the
@@ -363,12 +407,14 @@ run_phase() {
     snapshot_compaction        "${pdir}/compaction_before.txt"
 
     start_samplers "$pdir"
+    start_cachestat "$pdir"
     local full_start load_start load_end full_end
     full_start=$(date +%s); load_start=$full_start
     echo "=== ${phase}: running workload ==="
     "$@" >> "${pdir}/run.log" 2>&1
     load_end=$(date +%s)
     stop_samplers
+    stop_cachestat "$pdir"
     snapshot_netstat   "after" "${pdir}/netstat_after.txt"
     echo "=== ${phase}: workload done ==="
 

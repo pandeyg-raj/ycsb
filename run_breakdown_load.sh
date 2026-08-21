@@ -93,6 +93,16 @@ MEASURE_CASSANDRA_BACKPRESSURE=0   # 1 => also sample nodetool tpstats/compactio
 MEASURE_CACHESTAT=0                 # cachestat-bpfcc gates output on a TTY on these nodes
                                    # (verified: writes nothing to a file even foreground+stdbuf),
                                    # so exact hit rate comes from /proc/vmstat instead (always on).
+
+# -- Memory bandwidth per phase (node-level, IMC counters) --------------------
+# perf reads the integrated memory controller (uncore_imc) CAS read/write counts
+# -- socket-wide DRAM traffic on the node. Node-level (all of Cassandra + a small
+# idle floor), which is the approved approximation since Cassandra is the only load.
+# perf's IMC PMU auto-scales to bytes (each CAS = 64B baked into .scale), so the
+# output is already MiB. Needs perf + root; auto-skips a node if the IMC PMU is absent.
+MEASURE_MEMBW=1                    # 1 => sample uncore_imc read/write bandwidth per phase
+MEMBW_MAXDUR=14400                 # hard timeout (s) so perf can never orphan
+PERF_BIN=perf                      # override if the wrapper fails, e.g. /usr/lib/linux-tools-5.15.0-181/perf
 CACHESTAT_MAXDUR=14400             # hard timeout (s) so a tracer can never orphan
 
 # Wait for REAL compaction settlement on every node:                                                                                                                            
@@ -210,6 +220,22 @@ snapshot_cpustat() {
         echo "### node${node} ${tag}" >> "$outfile"
         ssh ${SSH_USER}@${ip} \
             "sudo cat ${CGROUP}/cpu.stat 2>/dev/null | grep -E '^(usage_usec|user_usec|system_usec|nr_throttled|throttled_usec) '; echo nproc \$(nproc)" >> "$outfile"
+    done
+}
+
+# Node-level CPU cross-check via /proc/stat (independent of the cgroup). The
+# aggregate 'cpu' line gives cumulative jiffies: user nice system idle iowait
+# irq softirq steal. Busy% over the phase = 1 - (idle+iowait)delta / totaldelta.
+# On a node where Cassandra is the only load, this should track the cgroup number
+# -- a divergence flags background noise or a cgroup-accounting problem.
+snapshot_procstat() {
+    local tag=$1 outfile=$2
+    : > "$outfile"
+    for node in "${BD_NODES[@]}"; do
+        local ip="10.10.1.$node"
+        echo "### node${node} ${tag}" >> "$outfile"
+        ssh ${SSH_USER}@${ip} \
+            "grep '^cpu ' /proc/stat; echo clk_tck \$(getconf CLK_TCK); echo nproc \$(nproc)" >> "$outfile"
     done
 }
 
@@ -412,6 +438,46 @@ stop_cachestat() {
 }
 
 # =============================================================================
+# Memory bandwidth per phase via perf uncore_imc counters, launched ON each node
+# for the workload window. perf -I interval mode writes a timestamped read/write
+# byte line every SAMPLE_SEC; timeout bounds it so it can never orphan. Any node
+# without perf or the IMC PMU is skipped. Output -> membw_node<N>.txt for parsing.
+# =============================================================================
+start_membw() {
+    local pdir=$1
+    [ "$MEASURE_MEMBW" != "1" ] && return 0
+    MEMBW_PIDFILE="${pdir}/.membw_pids"; : > "$MEMBW_PIDFILE"
+    local ms=$((SAMPLE_SEC * 1000))
+    for node in "${BD_NODES[@]}"; do
+        local ip="10.10.1.$node" ok pid
+        # verify perf + IMC PMU on this node before launching
+        ok=$(ssh ${SSH_USER}@${ip} "ls /sys/bus/event_source/devices/ 2>/dev/null | grep -qi imc && command -v ${PERF_BIN} >/dev/null 2>&1 && echo yes" 2>/dev/null)
+        if [ "$ok" != "yes" ]; then
+            echo "  perf/IMC not available on node ${node} -- skipping memory bandwidth there"
+            continue
+        fi
+        # -I interval (ms), -x, field-separated, aggregate read+write IMC events.
+        # perf's IMC scale prints bytes; -x, gives machine-parseable lines.
+        pid=$(ssh ${SSH_USER}@${ip} \
+            "sudo nohup timeout ${MEMBW_MAXDUR} ${PERF_BIN} stat -a -x, -I ${ms} \
+                -e uncore_imc/cas_count_read/,uncore_imc/cas_count_write/ \
+                > /mydata/membw_${node}.out 2>&1 & echo \$!")
+        echo "node${node} ${pid}" >> "$MEMBW_PIDFILE"
+    done
+}
+stop_membw() {
+    local pdir=$1
+    [ "$MEASURE_MEMBW" != "1" ] && return 0
+    [ -f "$MEMBW_PIDFILE" ] || return 0
+    while read -r node pid; do
+        local n="${node#node}" ip
+        ip="10.10.1.${n}"
+        ssh ${SSH_USER}@${ip} "sudo kill ${pid} 2>/dev/null; sudo pkill -f 'perf stat' 2>/dev/null" 2>/dev/null
+        ssh ${SSH_USER}@${ip} "cat /mydata/membw_${n}.out 2>/dev/null; sudo rm -f /mydata/membw_${n}.out" > "${pdir}/membw_${node}.txt" 2>/dev/null
+    done < "$MEMBW_PIDFILE"
+}
+
+# =============================================================================
 # PHASE RUNNER: BEFORE snapshots -> workload -> (load only: flush+settle) ->
 # AFTER snapshots -> collect -> parse into a per-phase resource_summary.txt.
 # Counters are NEVER reset: each phase takes its own before/after pair, so the
@@ -433,6 +499,7 @@ run_phase() {
     snapshot_memstat   "before" "${pdir}/memstat_before.txt"
     snapshot_diskstats          "${pdir}/diskstats_before.txt"
     snapshot_cpustat   "before" "${pdir}/cpustat_before.txt"
+    snapshot_procstat  "before" "${pdir}/procstat_before.txt"
     # NET snapshotted tightly around the workload (before any flush/settle SSH
     # storm), so /proc/net/dev is not polluted by our own control-plane traffic.
     [ "$MEASURE_NETWORK" = "1" ] && snapshot_netstat "before" "${pdir}/netstat_before.txt"
@@ -441,6 +508,7 @@ run_phase() {
 
     start_samplers "$pdir"
     start_cachestat "$pdir"
+    start_membw "$pdir"
     local full_start load_start load_end full_end
     full_start=$(date +%s); load_start=$full_start
     echo "=== ${phase}: running workload ==="
@@ -448,6 +516,7 @@ run_phase() {
     load_end=$(date +%s)
     stop_samplers
     stop_cachestat "$pdir"
+    stop_membw "$pdir"
     [ "$MEASURE_NETWORK" = "1" ] && snapshot_netstat "after" "${pdir}/netstat_after.txt"
     snapshot_vmstat    "after" "${pdir}/vmstat_after.txt"
     echo "=== ${phase}: workload done ==="
@@ -464,6 +533,7 @@ run_phase() {
     snapshot_memstat   "after" "${pdir}/memstat_after.txt"
     snapshot_diskstats         "${pdir}/diskstats_after.txt"
     snapshot_cpustat   "after" "${pdir}/cpustat_after.txt"
+    snapshot_procstat  "after" "${pdir}/procstat_after.txt"
     full_end=$(date +%s)
     { echo "FULL_START ${full_start}"; echo "FULL_END ${full_end}"; \
       echo "LOAD_START ${load_start}"; echo "LOAD_END ${load_end}"; } > "${pdir}/timings.txt"
@@ -564,6 +634,28 @@ mb = parse_kv(os.path.join(outdir, "memstat_before.txt"))
 ma = parse_kv(os.path.join(outdir, "memstat_after.txt"))
 cpu_b = parse_kv(os.path.join(outdir, "cpustat_before.txt"))
 cpu_a = parse_kv(os.path.join(outdir, "cpustat_after.txt"))
+
+# ---- node-level CPU from /proc/stat (cross-check on the cgroup number) ----
+def parse_procstat(path):
+    data, node = {}, None
+    if not os.path.exists(path):
+        return data
+    for line in open(path):
+        m = re.match(r'### node(\d+)', line)
+        if m:
+            node = "node" + m.group(1); data[node] = {}; continue
+        if node is None:
+            continue
+        p = line.split()
+        if p and p[0] == 'cpu':
+            # user nice system idle iowait irq softirq steal guest guest_nice
+            vals = [int(x) for x in p[1:] if x.isdigit()]
+            data[node]['fields'] = vals
+        elif len(p) == 2 and p[0] in ('clk_tck', 'nproc'):
+            data[node][p[0]] = int(p[1])
+    return data
+ps_b = parse_procstat(os.path.join(outdir, "procstat_before.txt"))
+ps_a = parse_procstat(os.path.join(outdir, "procstat_after.txt"))
 net_b_dev, net_b_nft = parse_netstat(os.path.join(outdir, "netstat_before.txt"))
 net_a_dev, net_a_nft = parse_netstat(os.path.join(outdir, "netstat_after.txt"))
 space_tot, space_per = parse_space(os.path.join(outdir, "space.txt"))
@@ -605,6 +697,33 @@ for node in sorted(set(cpu_b) & set(cpu_a)):
     tot_cpu_us += du; tot_user_us += duu; tot_sys_us += dus
     cpu_lines.append(f"{node}: cpu={du/1e6:8.2f}s  (user={duu/1e6:7.2f}s sys={dus/1e6:7.2f}s)  cores={cores:>3}  util={util:5.1f}%")
 cpu_per_op_us = tot_cpu_us / ops if ops else float("nan")
+
+# ---- node-level CPU busy% from /proc/stat (cross-check) ----
+# busy% = 1 - (idle+iowait)delta / total_jiffies_delta, per node (all cores).
+proc_lines = []
+proc_busy_sum = 0.0; proc_n = 0
+for node in sorted(set(ps_b) & set(ps_a)):
+    fb = ps_b[node].get('fields'); fa = ps_a[node].get('fields')
+    if not fb or not fa or len(fb) < 5 or len(fa) < 5:
+        continue
+    d = [a - b for a, b in zip(fa, fb)]
+    total = sum(d)
+    if total <= 0:
+        continue
+    idle = d[3] + d[4]  # idle + iowait
+    busy_pct = (1 - idle/total) * 100
+    # also express as cgroup-comparable: cgroup util% is over the SAME cores
+    proc_busy_sum += busy_pct; proc_n += 1
+    # cgroup busy% for the same node, for side-by-side
+    cg = None
+    if node in cpu_b and node in cpu_a and full_wall:
+        du = cpu_a[node].get("usage_usec",0) - cpu_b[node].get("usage_usec",0)
+        cores = cpu_a[node].get("nproc",0) or 1
+        cg = (du/1e6)/full_wall/cores*100
+    cgs = f"{cg:5.1f}%" if cg is not None else "  n/a"
+    proc_lines.append(f"{node}: node_busy={busy_pct:5.1f}%  (cgroup={cgs})  [diff={busy_pct-cg:+5.1f}pp]" if cg is not None
+                      else f"{node}: node_busy={busy_pct:5.1f}%  (cgroup=  n/a)")
+proc_busy_avg = proc_busy_sum/proc_n if proc_n else float('nan')
 
 # ---- net ----
 net_lines, tot_rx, tot_tx = [], 0, 0
@@ -665,6 +784,19 @@ with open(summary, "w") as out:
     else:
         out.write("no cpu.stat data -- is the cpu controller delegated? "
                   "check `cat /sys/fs/cgroup/mylimitedgroup/cgroup.controllers`\n")
+    out.write("\n")
+
+    out.write("--- CPU cross-check (/proc/stat, node-level, all cores) ---\n")
+    if proc_lines:
+        out.write("\n".join(proc_lines) + "\n")
+        out.write(f"cluster mean node_busy : {proc_busy_avg:.1f}%\n")
+        out.write("  node_busy = whole-node CPU busy% (1 - (idle+iowait)/total) from /proc/stat.\n")
+        out.write("  cgroup = Cassandra-only util% from cpu.stat. On a dedicated node the two\n")
+        out.write("  should track; a large positive diff = non-Cassandra load on the node,\n")
+        out.write("  a large negative diff = a cgroup cpu-accounting problem. This is the\n")
+        out.write("  independent check on the cgroup CPU number.\n")
+    else:
+        out.write("no /proc/stat data captured.\n")
     out.write("\n")
 
     out.write("--- NETWORK (/proc/net/dev, workload window only) ---\n")

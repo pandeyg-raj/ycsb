@@ -866,15 +866,20 @@ preflight_health() {
     echo "--- preflight: cluster health ---"
     local bad=0
     local st; st="$(${CASS_DIR}/bin/nodetool status 2>/dev/null)"
-    local up; up="$(echo "$st" | grep -cE '^UN')"
-    local notup; notup="$(echo "$st" | grep -E '^(DN|UJ|UL|UM|\?N)')"
+    # Count UN nodes by matching status lines that carry a cluster IP, tolerant of
+    # leading whitespace. A healthy node line looks like: 'UN  10.10.1.2  ...'
+    local up; up="$(echo "$st" | grep -E '^[[:space:]]*UN[[:space:]]+10\.10\.1\.' | wc -l | tr -d ' ')"
+    local notup; notup="$(echo "$st" | grep -E '^[[:space:]]*(DN|U[JLM]|\?[NDJLM])[[:space:]]+10\.10\.1\.')"
     echo "  nodes UN: ${up}/${NUM_NODES}"
-    if [ "$up" != "$NUM_NODES" ]; then
-        echo "  !! not all nodes UN:"; echo "$notup" | sed 's/^/     /'; bad=1
+    if [ "$up" -ne "$NUM_NODES" ] 2>/dev/null; then
+        echo "  !! not all nodes UN:"; echo "${notup:-     (no DN/UJ lines; check nodetool status output above)}" | sed 's/^/     /'; bad=1
     fi
+    # Dropped check: tpstats has a header row 'Message type ... Dropped ...' then
+    # one row per message type whose 2nd column is the dropped count. Sum column 2
+    # over the data rows (skip the header), flag if any are > 0.
     for node in "${BD_NODES[@]}"; do
         local dropped
-        dropped="$(ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool tpstats 2>/dev/null | awk '/^Dropped/{f=1;next} f&&\$2+0>0{print \$1\"=\"\$2}'" 2>/dev/null)"
+        dropped="$(ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool tpstats 2>/dev/null | awk 'NR>1 && /^[A-Z_]+[[:space:]]+[0-9]+/ && \$2+0>0 {print \$1\"=\"\$2}'" 2>/dev/null)"
         if [ -n "$dropped" ]; then
             echo "  !! node ${node} has dropped messages: ${dropped}"; bad=1
         fi

@@ -21,16 +21,31 @@ SSH_USER="${SSH_USER:-rzp5412}"
 BD_NODES=(2 3 4 5 6)
 CGROUP="${CGROUP:-/sys/fs/cgroup/mylimitedgroup}"
 HARNESS="${HARNESS:-./run_breakdown_load.sh}"
-
-# --- sweep parameters (all overridable via env) ---
-CACHE_GB="${CACHE_GB:-32}"          # memory cap (GB), held constant across the sweep
-WTHREADS="${WTHREADS:-64}"          # load threads
-RTHREADS="${RTHREADS:-64}"          # read threads
-PHASE_MODE="${PHASE_MODE:-2}"       # 2 = load+read (the point of this experiment)
-MEASURE_NETWORK="${MEASURE_NETWORK:-0}"
-CAPS="${CAPS:-3 2 1}"               # cores/node to sweep
-SYSTEMS="${SYSTEMS:-ec rep}"        # systems to compare
 PERIOD=100000                       # cpu.max period (us); quota = cores*period
+
+# --- ask once for the shared settings (same questions as the single-run script),
+#     then drive all runs with these answers. Env vars still override if set.
+echo "=== CPU-cap sweep setup ==="
+if [ -z "${CACHE_GB:-}" ]; then read -p "Cassandra memory cap in GB (e.g. 32): " CACHE_GB; fi
+if [ -z "${WTHREADS:-}" ]; then read -p "Load (insert) threads: " WTHREADS; fi
+if [ -z "${PHASE_MODE:-}" ]; then read -p "Phase mode -- 1 = load only, 2 = load + read: " PHASE_MODE; fi
+PHASE_MODE="${PHASE_MODE:-2}"
+if [ "$PHASE_MODE" = "2" ]; then
+    if [ -z "${RTHREADS:-}" ]; then read -p "Read (run) threads: " RTHREADS; fi
+else
+    RTHREADS=0
+fi
+if [ -z "${MEASURE_NETWORK:-}" ]; then read -p "Measure network? 1 = yes, 0 = no: " MEASURE_NETWORK; fi
+MEASURE_NETWORK="${MEASURE_NETWORK:-0}"
+if [ -z "${CAPS:-}" ]; then
+    read -p "CPU caps to sweep, cores/node space-separated [default: 3 2 1]: " CAPS
+    CAPS="${CAPS:-3 2 1}"
+fi
+if [ -z "${SYSTEMS:-}" ]; then
+    read -p "Systems to run, space-separated [default: ec rep]: " SYSTEMS
+    SYSTEMS="${SYSTEMS:-ec rep}"
+fi
+echo ""
 
 echo "############################################################"
 echo "# CPU-cap sweep"

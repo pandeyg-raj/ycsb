@@ -865,18 +865,18 @@ trap cleanup EXIT INT TERM
 preflight_health() {
     echo "--- preflight: cluster health ---"
     local bad=0
-    local st; st="$(${CASS_DIR}/bin/nodetool status 2>/dev/null)"
-    # Count UN nodes by matching status lines that carry a cluster IP, tolerant of
-    # leading whitespace. A healthy node line looks like: 'UN  10.10.1.2  ...'
+    # node0 is the CLIENT and has no local Cassandra -- query a storage node over
+    # SSH, like everywhere else in this script. Use the first BD node as the probe.
+    local probe="${BD_NODES[0]}"
+    local st; st="$(ssh ${SSH_USER}@10.10.1.${probe} "${CASS_DIR}/bin/nodetool status 2>/dev/null")"
     local up; up="$(echo "$st" | grep -E '^[[:space:]]*UN[[:space:]]+10\.10\.1\.' | wc -l | tr -d ' ')"
-    local notup; notup="$(echo "$st" | grep -E '^[[:space:]]*(DN|U[JLM]|\?[NDJLM])[[:space:]]+10\.10\.1\.')"
-    echo "  nodes UN: ${up}/${NUM_NODES}"
-    if [ "$up" -ne "$NUM_NODES" ] 2>/dev/null; then
-        echo "  !! not all nodes UN:"; echo "${notup:-     (no DN/UJ lines; check nodetool status output above)}" | sed 's/^/     /'; bad=1
+    echo "  nodes UN: ${up}/${NUM_NODES}  (via node ${probe})"
+    if [ "${up:-0}" -ne "$NUM_NODES" ] 2>/dev/null; then
+        echo "  !! not all nodes UN. Raw nodetool status:"
+        echo "$st" | sed 's/^/     /'
+        bad=1
     fi
-    # Dropped check: tpstats has a header row 'Message type ... Dropped ...' then
-    # one row per message type whose 2nd column is the dropped count. Sum column 2
-    # over the data rows (skip the header), flag if any are > 0.
+    # Dropped check: skip header (NR>1), match 'MSG_TYPE  <count> ...' rows, flag >0.
     for node in "${BD_NODES[@]}"; do
         local dropped
         dropped="$(ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool tpstats 2>/dev/null | awk 'NR>1 && /^[A-Z_]+[[:space:]]+[0-9]+/ && \$2+0>0 {print \$1\"=\"\$2}'" 2>/dev/null)"
@@ -888,7 +888,7 @@ preflight_health() {
         echo ""
         echo "  ABORTING: cluster is degraded (see above). Fix the node(s) first --"
         echo "  a run on a dropping/down cluster produces corrupt counters and tails."
-        echo "  (To bypass for a deliberate fault-injection run, comment out preflight_health.)"
+        echo "  (To bypass for a deliberate fault-injection run, comment out the preflight_health call.)"
         exit 1
     fi
     echo "  cluster healthy."

@@ -472,14 +472,15 @@ stop_membw() {
     while read -r node pid; do
         local n="${node#node}" ip
         ip="10.10.1.${n}"
-        # Kill the timeout wrapper AND its perf child (killing the wrapper alone
-        # can leave perf running -> file keeps growing / never flushes). pkill the
-        # perf process group, give it a moment to flush its last interval, then collect.
-        ssh ${SSH_USER}@${ip} "sudo kill ${pid} 2>/dev/null; sudo pkill -TERM -f 'perf stat -a' 2>/dev/null; sleep 1; sudo pkill -KILL -f 'perf stat -a' 2>/dev/null" 2>/dev/null
+        # NOTE: ssh -n (stdin from /dev/null) is REQUIRED here -- without it, ssh
+        # consumes the rest of the pidfile from the loop's stdin and the while-read
+        # loop exits after the first node. This is why only node2 was ever processed.
+        # Kill the timeout wrapper AND its perf child, flush, then collect.
+        ssh -n ${SSH_USER}@${ip} "sudo kill ${pid} 2>/dev/null; sudo pkill -TERM -f 'perf stat -a' 2>/dev/null; sleep 1; sudo pkill -KILL -f 'perf stat -a' 2>/dev/null" 2>/dev/null
         # collect to a temp, verify non-empty, THEN remove remote file
-        ssh ${SSH_USER}@${ip} "cat /mydata/membw_${n}.out 2>/dev/null" > "${pdir}/membw_${node}.txt" 2>/dev/null
+        ssh -n ${SSH_USER}@${ip} "cat /mydata/membw_${n}.out 2>/dev/null" > "${pdir}/membw_${node}.txt" 2>/dev/null
         if [ -s "${pdir}/membw_${node}.txt" ]; then
-            ssh ${SSH_USER}@${ip} "sudo rm -f /mydata/membw_${n}.out" 2>/dev/null
+            ssh -n ${SSH_USER}@${ip} "sudo rm -f /mydata/membw_${n}.out" 2>/dev/null
         else
             echo "  WARN: membw collection empty for ${node} -- leaving /mydata/membw_${n}.out on the node for manual recovery"
         fi

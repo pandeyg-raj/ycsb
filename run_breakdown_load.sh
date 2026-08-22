@@ -448,17 +448,25 @@ start_membw() {
     [ "$MEASURE_MEMBW" != "1" ] && return 0
     MEMBW_PIDFILE="${pdir}/.membw_pids"; : > "$MEMBW_PIDFILE"
     local ms=$((SAMPLE_SEC * 1000))
+    # Pre-launch cleanup: a prior run can leave orphaned perf processes and stale
+    # /mydata/membw_<n>.out files on the nodes. Kill any leftover perf and delete
+    # old output files on EVERY node first, so this phase starts from a clean slate
+    # and old data can never be mis-collected. (ssh -n: stdin-safe in case of loops.)
+    for node in "${BD_NODES[@]}"; do
+        ssh -n ${SSH_USER}@10.10.1.$node \
+            "sudo pkill -KILL -x perf 2>/dev/null; sudo pkill -KILL -f 'perf stat -a' 2>/dev/null; sudo rm -f /mydata/membw_${node}.out 2>/dev/null" 2>/dev/null
+    done
     for node in "${BD_NODES[@]}"; do
         local ip="10.10.1.$node" ok pid
         # verify perf + IMC PMU on this node before launching
-        ok=$(ssh ${SSH_USER}@${ip} "ls /sys/bus/event_source/devices/ 2>/dev/null | grep -qi imc && command -v ${PERF_BIN} >/dev/null 2>&1 && echo yes" 2>/dev/null)
+        ok=$(ssh -n ${SSH_USER}@${ip} "ls /sys/bus/event_source/devices/ 2>/dev/null | grep -qi imc && command -v ${PERF_BIN} >/dev/null 2>&1 && echo yes" 2>/dev/null)
         if [ "$ok" != "yes" ]; then
             echo "  perf/IMC not available on node ${node} -- skipping memory bandwidth there"
             continue
         fi
         # -I interval (ms), -x, field-separated, aggregate read+write IMC events.
         # perf's IMC scale prints bytes; -x, gives machine-parseable lines.
-        pid=$(ssh ${SSH_USER}@${ip} \
+        pid=$(ssh -n ${SSH_USER}@${ip} \
             "sudo nohup timeout ${MEMBW_MAXDUR} ${PERF_BIN} stat -a -x, -I ${ms} \
                 -e uncore_imc/cas_count_read/,uncore_imc/cas_count_write/ \
                 > /mydata/membw_${node}.out 2>&1 & echo \$!")

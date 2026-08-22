@@ -105,6 +105,16 @@ MEMBW_MAXDUR=14400                 # hard timeout (s) so perf can never orphan
 PERF_BIN=perf                      # override if the wrapper fails, e.g. /usr/lib/linux-tools-5.15.0-181/perf
 CACHESTAT_MAXDUR=14400             # hard timeout (s) so a tracer can never orphan
 
+# -- CPU cap (cgroup cpu.max) --------------------------------------------------
+# Restrict the cgroup's CPU to expose EC's decode/encode cost vs REP. Value is the
+# cpu.max string "QUOTA PERIOD" in microseconds; QUOTA/PERIOD = cores of CPU time
+# the cgroup may use (spread across all 16 logical CPUs by the scheduler).
+#   "max"            = uncapped (default; a normal run is unaffected)
+#   "300000 100000"  = 3 logical cores   "200000 100000" = 2   "100000 100000" = 1
+# Set via env CPU_MAX for the sweep wrapper; applied at cluster start so BOTH load
+# and read run under the cap. Recorded in the result dir for self-documentation.
+CPU_MAX="${CPU_MAX:-max}"          # env-overridable; "max" = no cap
+
 # Wait for REAL compaction settlement on every node:                                                                                                                            
   #   pending tasks == 0  AND  ycsb compaction count unchanged,                                                                                                                   
   #   sustained for STABLE_NEEDED consecutive polls (defeats momentary lulls).                                                                                                    
@@ -156,9 +166,9 @@ hard_restart_cluster() {
         echo "  ${ip} stopped"
     done
 
-    echo "  [2/3] Wiping data in parallel..."
+    echo "  [2/3] Wiping data + logs in parallel..."
     for node in "${BD_NODES[@]}"; do
-        ssh ${SSH_USER}@10.10.1.${node} "rm -rf ${CASS_DIR}/data/" &
+        ssh ${SSH_USER}@10.10.1.${node} "rm -rf ${CASS_DIR}/data/ ${CASS_DIR}/logs/" &
     done
     wait
 
@@ -171,6 +181,7 @@ hard_restart_cluster() {
             "cd ${CASS_DIR} && \
              echo '+cpu' | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 ; \
              echo ${mem_bytes} | sudo tee ${CGROUP}/memory.max > /dev/null && \
+             echo '${CPU_MAX}' | sudo tee ${CGROUP}/cpu.max > /dev/null && \
              echo \$\$ | sudo tee ${CGROUP}/cgroup.procs > /dev/null && \
              bin/cassandra > /dev/null 2>&1"
         local a=0
@@ -184,7 +195,13 @@ hard_restart_cluster() {
 
     echo "  Creating table via /mydata/${CREATE_TABLE_BIN}..."
     /mydata/${CREATE_TABLE_BIN}
-    echo "=== HARD restart complete (capped ${cache_size}). ==="
+    # verify + record the actual cpu.max each node ended up with (self-documenting)
+    echo "  CPU cap applied: cpu.max='${CPU_MAX}' (verifying per node)"
+    for node in "${BD_NODES[@]}"; do
+        local got; got=$(ssh ${SSH_USER}@10.10.1.$node "cat ${CGROUP}/cpu.max 2>/dev/null")
+        echo "    node${node}: cpu.max=${got}"
+    done
+    echo "=== HARD restart complete (mem cap ${cache_size}, cpu cap ${CPU_MAX}). ==="
 }
 
 # =============================================================================
@@ -299,19 +316,21 @@ for bin in create_table_ec_compr_on create_table_ec_compr_off \
 done
 echo "OK."; echo ""
 
-echo "Is this EC or REP?"; read EXP_LABEL
-read -p "Cassandra memory cap in GB (e.g. 32): " CACHE_GB
-read -p "Load (insert) threads: " WTHREADS
-read -p "Phase mode -- 1 = load only, 2 = load + read: " PHASE_MODE
+# All prompts are env-overridable so a sweep wrapper can drive this non-interactively.
+# If the env var is already set, we skip the read and use it.
+if [ -z "$EXP_LABEL" ]; then echo "Is this EC or REP?"; read EXP_LABEL; fi
+if [ -z "$CACHE_GB" ]; then read -p "Cassandra memory cap in GB (e.g. 32): " CACHE_GB; fi
+if [ -z "$WTHREADS" ]; then read -p "Load (insert) threads: " WTHREADS; fi
+if [ -z "$PHASE_MODE" ]; then read -p "Phase mode -- 1 = load only, 2 = load + read: " PHASE_MODE; fi
 PHASE_MODE="${PHASE_MODE:-2}"
 if [ "$PHASE_MODE" = "1" ]; then
     RTHREADS=0
     echo "  -> LOAD-ONLY run (read phase skipped)."
 else
     PHASE_MODE=2
-    read -p "Read (run) threads: " RTHREADS
+    if [ -z "$RTHREADS" ]; then read -p "Read (run) threads: " RTHREADS; fi
 fi
-read -p "Measure network? 1 = yes, 0 = no (skip all network measurement): " MEASURE_NETWORK
+if [ -z "$MEASURE_NETWORK" ]; then read -p "Measure network? 1 = yes, 0 = no (skip all network measurement): " MEASURE_NETWORK; fi
 MEASURE_NETWORK="${MEASURE_NETWORK:-0}"
 [ "$MEASURE_NETWORK" = "1" ] || { MEASURE_NETWORK=0; MEASURE_NET_PORTS=0; echo "  -> network measurement OFF."; }
 
@@ -323,10 +342,27 @@ else
     CREATE_TABLE_BIN="create_table_ec_compr_${COMPRESSION}"; SYS_KIND="ec"
 fi
 
-OUT_DIR="result_breakdown_${EXP_LABEL}_${COMPRESSION}_${CACHE_SIZE}"
+# Tag the output dir with the CPU cap so the 6 sweep runs never collide and are
+# easy to tell apart. "max" -> cpuUNCAPPED; "300000 100000" -> cpu3 (cores).
+cpu_tag() {
+    case "$CPU_MAX" in
+        max|MAX|"") echo "cpuUNCAPPED" ;;
+        *) local q="${CPU_MAX%% *}" p="${CPU_MAX##* }"
+           # cores = quota/period, integer if divisible else keep raw
+           if [ -n "$q" ] && [ -n "$p" ] && [ "$p" -gt 0 ] 2>/dev/null; then
+               echo "cpu$((q / p))"
+           else echo "cpuCUSTOM"; fi ;;
+    esac
+}
+CPU_TAG="$(cpu_tag)"
+
+OUT_DIR="result_breakdown_${EXP_LABEL}_${COMPRESSION}_${CACHE_SIZE}_${CPU_TAG}"
 mkdir -p "$OUT_DIR"
 LOG="${OUT_DIR}/run.log"
 BREAKDOWN_FILE="${OUT_DIR}/breakdown.txt"; touch "$BREAKDOWN_FILE"
+# stamp the cap into the result dir for self-documentation
+echo "CPU_MAX=${CPU_MAX}  (tag=${CPU_TAG})" > "${OUT_DIR}/cpu_cap.txt"
+echo "mem_cap=${CACHE_SIZE}" >> "${OUT_DIR}/cpu_cap.txt"
 
 echo ""
 echo "################################################################"
@@ -706,6 +742,7 @@ r_per_op = tot_read  / ops if ops else float('nan')
 
 # ---- cpu ----
 cpu_lines, tot_cpu_us, tot_user_us, tot_sys_us = [], 0, 0, 0
+thr_lines, tot_nr_throttled, tot_throttled_us = [], 0, 0
 for node in sorted(set(cpu_b) & set(cpu_a)):
     du  = cpu_a[node].get("usage_usec", 0)  - cpu_b[node].get("usage_usec", 0)
     duu = cpu_a[node].get("user_usec", 0)   - cpu_b[node].get("user_usec", 0)
@@ -714,6 +751,14 @@ for node in sorted(set(cpu_b) & set(cpu_a)):
     util = (du/1e6)/full_wall/cores*100 if full_wall else float("nan")
     tot_cpu_us += du; tot_user_us += duu; tot_sys_us += dus
     cpu_lines.append(f"{node}: cpu={du/1e6:8.2f}s  (user={duu/1e6:7.2f}s sys={dus/1e6:7.2f}s)  cores={cores:>3}  util={util:5.1f}%")
+    # throttling deltas -- the direct evidence the cap is biting this system.
+    dthr = cpu_a[node].get("nr_throttled", 0)   - cpu_b[node].get("nr_throttled", 0)
+    dtus = cpu_a[node].get("throttled_usec", 0) - cpu_b[node].get("throttled_usec", 0)
+    tot_nr_throttled += dthr; tot_throttled_us += dtus
+    # throttled_usec accumulates across throttled periods/threads, so this ratio
+    # can exceed 100% -- it's throttle-seconds relative to wall, not a duty cycle.
+    thr_pct = (dtus/1e6)/full_wall*100 if full_wall else float("nan")
+    thr_lines.append(f"{node}: nr_throttled={dthr:>8}  throttled={dtus/1e6:8.2f}s  ({thr_pct:6.1f}% of wall)")
 cpu_per_op_us = tot_cpu_us / ops if ops else float("nan")
 
 # ---- node-level CPU busy% from /proc/stat (cross-check) ----
@@ -815,6 +860,20 @@ with open(summary, "w") as out:
         out.write("  independent check on the cgroup CPU number.\n")
     else:
         out.write("no /proc/stat data captured.\n")
+    out.write("\n")
+
+    out.write("--- CPU THROTTLING (cgroup cpu.stat, the cap's direct effect) ---\n")
+    if thr_lines:
+        out.write("\n".join(thr_lines) + "\n")
+        thr_tot_pct = (tot_throttled_us/1e6)/full_wall/max(1,len(thr_lines))*100 if full_wall else float("nan")
+        out.write(f"CLUSTER nr_throttled : {tot_nr_throttled}   total throttled : {tot_throttled_us/1e6:.2f}s\n")
+        out.write("  nr_throttled = # of periods the cgroup was stopped for hitting cpu.max.\n")
+        out.write("  throttled = wall time spent frozen waiting for quota. LARGE here = the cap\n")
+        out.write("  is bottlenecking this system; NEAR-ZERO = the cap is not biting. This is the\n")
+        out.write("  direct evidence: under the same cap, EC should throttle >> REP if EC is more\n")
+        out.write("  CPU-bound. Pair with cpu_cap.txt (the cap that was set) for the full story.\n")
+    else:
+        out.write("no throttling data (uncapped run, or cpu.stat missing throttle fields).\n")
     out.write("\n")
 
     out.write("--- NETWORK (/proc/net/dev, workload window only) ---\n")

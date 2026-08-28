@@ -33,7 +33,11 @@ DB=cassandra-cql
 
 FIELD_LENGTH=10000
 RECORD_COUNT=5000000
-MEASURE_OPS=10000000       # read-phase operationcount (100% read workload)
+MEASURE_OPS=2000000        # read-phase operationcount (100% read workload)
+                           # 2M (was 10M): p99/util/throttling are steady-state rates,
+                           # so 2M samples give the same trend at ~5x faster reads.
+                           # RECORD_COUNT stays 5M so the dataset still exceeds the
+                           # 32GB cache cap (cache-pressure regime preserved).
 COMPRESSION="on"
 
 NUM_NODES=5
@@ -614,9 +618,25 @@ run_phase() {
     done
 
     # ---- parse -> per-phase resource summary ----
-    python3 - "$pdir" "${pdir}/resource_summary.txt" "$ops" "$SYS_KIND" "$FIELD_LENGTH" "$CACHE_SIZE" "$COMPRESSION" "$phase" "$op_label" "$RECORD_COUNT" << 'PYEOF'
+    python3 - "$pdir" "${pdir}/resource_summary.txt" "$ops" "$SYS_KIND" "$FIELD_LENGTH" "$CACHE_SIZE" "$COMPRESSION" "$phase" "$op_label" "$RECORD_COUNT" "$CPU_MAX" << 'PYEOF'
 import sys, re, os
 outdir, summary, ops, sys_kind, field_len, cache_size, compression, phase, op_label, record_count = sys.argv[1:11]
+# optional 11th arg: the cpu.max string ("max" or "QUOTA PERIOD"); derive cap cores.
+cpu_max_str = sys.argv[11] if len(sys.argv) > 11 else "max"
+def _cap_cores(s):
+    s = (s or "max").strip()
+    if s.lower() in ("max", ""):
+        return None  # uncapped
+    parts = s.split()
+    if len(parts) == 2:
+        try:
+            q, p = float(parts[0]), float(parts[1])
+            if p > 0:
+                return q / p
+        except ValueError:
+            pass
+    return None
+cap_cores = _cap_cores(cpu_max_str)
 ops = int(ops); field_len = int(field_len); record_count = int(record_count)
 dataset_logical = record_count * field_len   # bytes of loaded dataset (phase-independent)
 
@@ -750,7 +770,13 @@ for node in sorted(set(cpu_b) & set(cpu_a)):
     cores = cpu_a[node].get("nproc", 0) or 1
     util = (du/1e6)/full_wall/cores*100 if full_wall else float("nan")
     tot_cpu_us += du; tot_user_us += duu; tot_sys_us += dus
-    cpu_lines.append(f"{node}: cpu={du/1e6:8.2f}s  (user={duu/1e6:7.2f}s sys={dus/1e6:7.2f}s)  cores={cores:>3}  util={util:5.1f}%")
+    # optional % of the CPU cap (of the cap_cores budget, not the full node)
+    if cap_cores and full_wall:
+        util_cap = (du/1e6)/full_wall/cap_cores*100
+        cap_str = f"  util_of_cap({cap_cores:g})={util_cap:5.1f}%"
+    else:
+        cap_str = ""
+    cpu_lines.append(f"{node}: cpu={du/1e6:8.2f}s  (user={duu/1e6:7.2f}s sys={dus/1e6:7.2f}s)  cores={cores:>3}  util={util:5.1f}%{cap_str}")
     # throttling deltas -- the direct evidence the cap is biting this system.
     dthr = cpu_a[node].get("nr_throttled", 0)   - cpu_b[node].get("nr_throttled", 0)
     dtus = cpu_a[node].get("throttled_usec", 0) - cpu_b[node].get("throttled_usec", 0)
@@ -837,13 +863,25 @@ with open(summary, "w") as out:
 
     out.write("--- CPU (cgroup cpu.stat) ---\n")
     out.write(f"window wall time : {full_wall}s\n")
+    if cap_cores:
+        out.write(f"CPU cap active : {cpu_max_str}  = {cap_cores:g} core(s)/node "
+                  f"({cap_cores/ (cpu_a[list(cpu_a)[0]].get('nproc',16) or 16)*100:.1f}% of full node). "
+                  f"util%% below is of FULL node; util_of_cap%% is of the {cap_cores:g}-core budget.\n")
     if cpu_lines:
         out.write("\n".join(cpu_lines) + "\n")
         out.write(f"TOTAL CPU-time : {tot_cpu_us/1e6:.2f}s (user={tot_user_us/1e6:.2f}s system={tot_sys_us/1e6:.2f}s)\n")
         out.write(f"CPU per {op_label}-op : {cpu_per_op_us:.1f} us/op\n")
         out.write(f"CPU per dataset GiB : {tot_cpu_us/1e6/logical_gib:.2f} s/GiB\n")
         if full_wall:
+            ncores = cpu_a[list(cpu_a)[0]].get('nproc',16) or 16
+            nnodes = len(cpu_lines)
             out.write(f"Aggregate busy cores (cluster) : {tot_cpu_us/1e6/full_wall:.2f} cores-equivalent\n")
+            cluster_util = tot_cpu_us/1e6/full_wall/ncores/nnodes*100
+            out.write(f"Cluster util (of full {ncores}x{nnodes} cores) : {cluster_util:.1f}%\n")
+            if cap_cores:
+                cluster_util_cap = tot_cpu_us/1e6/full_wall/cap_cores/nnodes*100
+                out.write(f"Cluster util (of {cap_cores:g}-core cap x{nnodes}) : {cluster_util_cap:.1f}%  "
+                          f"<- how fully the cap budget was used (near 100%% = pinned at ceiling)\n")
     else:
         out.write("no cpu.stat data -- is the cpu controller delegated? "
                   "check `cat /sys/fs/cgroup/mylimitedgroup/cgroup.controllers`\n")

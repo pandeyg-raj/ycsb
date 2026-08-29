@@ -52,27 +52,22 @@ PERF_BIN=perf
 MEASURE_NETWORK="${MEASURE_NETWORK:-0}"
 MEASURE_NET_PORTS=0
 
-# ---------- arg: system whose data is on disk ----------
-SYS_ARG="${1:-}"
-if [ -z "$SYS_ARG" ]; then echo "usage: bash run_read_sweep.sh <ec|rep>"; exit 1; fi
-if echo "$SYS_ARG" | grep -qi rep; then SYS_KIND=rep; else SYS_KIND=ec; fi
+# ---------- system is determined from the EXP_LABEL prompt below ----------
 
 # ---------- prompts (env-overridable) ----------
-echo "=== read-only CPU-cap sweep (system on disk: ${SYS_KIND}) ==="
+echo "=== read-only CPU-cap sweep (reads an ALREADY-LOADED dataset) ==="
+if [ -z "${EXP_LABEL:-}" ]; then read -p "Is the loaded data EC or REP? " EXP_LABEL; fi
+if echo "$EXP_LABEL" | grep -qi rep; then SYS_KIND=rep; else SYS_KIND=ec; fi
 if [ -z "${CACHE_GB:-}" ]; then read -p "Cassandra memory cap in GB (e.g. 32): " CACHE_GB; fi
 if [ -z "${RTHREADS:-}" ]; then read -p "Read (run) threads: " RTHREADS; fi
 if [ -z "${MEASURE_OPS:-}" ]; then read -p "Read operationcount [default 2000000]: " MEASURE_OPS; MEASURE_OPS="${MEASURE_OPS:-2000000}"; fi
 if [ -z "${CAPS:-}" ]; then read -p "CPU caps to sweep, cores/node [default: 3 2 1]: " CAPS; CAPS="${CAPS:-3 2 1}"; fi
+if [ -z "${ITERATIONS:-}" ]; then read -p "How many iterations (repeat the whole sweep N times) [default 1]: " ITERATIONS; ITERATIONS="${ITERATIONS:-1}"; fi
+case "$ITERATIONS" in ''|*[!0-9]*) ITERATIONS=1;; esac
+[ "$ITERATIONS" -lt 1 ] 2>/dev/null && ITERATIONS=1
 if [ -z "${MEASURE_NETWORK:-}" ]; then MEASURE_NETWORK=0; fi
 CACHE_SIZE="${CACHE_GB}GB"
 mem_bytes=$(( ${CACHE_GB} * 1024 * 1024 * 1024 ))
-
-echo ""
-echo "############################################################"
-echo "# read-only sweep | system=${SYS_KIND} | caps=${CAPS} | ops=${MEASURE_OPS}"
-echo "# mem cap=${CACHE_SIZE} | read thr=${RTHREADS} | dist=${READ_DIST}"
-echo "# COLD cache every run (vmtouch -e data/ + drop_caches)"
-echo "############################################################"
 
 # ---------- always clear cpu cap on exit ----------
 clear_cpu_cap() {
@@ -193,17 +188,25 @@ stop_membw() {
 # =============================================================================
 read_once() {
     local cores=$1
-    local quota=$((cores*PERIOD)) cpumax="${cores}"
+    local iter=$2
+    local quota=$((cores*PERIOD)) cpumax cap_tag
     if [ "$cores" -ge 16 ] 2>/dev/null; then cpumax="max"; cap_tag="cpu16"; else cpumax="${quota} ${PERIOD}"; cap_tag="cpu${cores}"; fi
 
-    local OUT_DIR="result_readsweep_${SYS_KIND}_${COMPRESSION}_${CACHE_SIZE}_${cap_tag}"
-    local pdir="${OUT_DIR}/read"; mkdir -p "$pdir"
-    echo "CPU_MAX=${cpumax}  (tag=${cap_tag})" > "${OUT_DIR}/cpu_cap.txt"
+    local OUT_DIR="result_readsweep_${SYS_KIND}_${COMPRESSION}_${CACHE_SIZE}_${cap_tag}_iter${iter}"
+    local pdir="${OUT_DIR}/read"
+
+    # skip-if-done: if this run already completed (summary exists & non-empty), skip.
+    if [ -s "${pdir}/resource_summary.txt" ]; then
+        echo ">>> SKIP (already done): ${OUT_DIR}"
+        return 0
+    fi
+    mkdir -p "$pdir"
+    echo "CPU_MAX=${cpumax}  (tag=${cap_tag})  iteration=${iter}" > "${OUT_DIR}/cpu_cap.txt"
     echo "mem_cap=${CACHE_SIZE}  system=${SYS_KIND}  read_only_against_preloaded_data" >> "${OUT_DIR}/cpu_cap.txt"
 
     echo ""
     echo "==================================================================="
-    echo ">>> READ @ cap=${cores} core(s)  cpu.max='${cpumax}'  -> ${OUT_DIR}"
+    echo ">>> READ  iter=${iter}  cap=${cores} core(s)  cpu.max='${cpumax}'  -> ${OUT_DIR}"
     echo "==================================================================="
 
     restart_preserving_data "$cpumax"
@@ -391,14 +394,30 @@ PYEOF
     echo "  -> ${pdir}/resource_summary.txt"
 }
 
-# ---------- drive the sweep ----------
-for cores in $CAPS; do
-    read_once "$cores"
+# ---------- drive the sweep: OUTER = iteration, INNER = caps ----------
+echo ""
+echo "############################################################"
+echo "# read-only sweep | system=${SYS_KIND} | caps=${CAPS}"
+echo "# iterations=${ITERATIONS} (full sweep repeated ${ITERATIONS}x)"
+echo "# ops=${MEASURE_OPS} | mem cap=${CACHE_SIZE} | read thr=${RTHREADS} | dist=${READ_DIST}"
+echo "# COLD cache every run (vmtouch -e data/ + drop_caches). Data never wiped."
+echo "############################################################"
+
+total=0; ncaps=0; for c in $CAPS; do ncaps=$((ncaps+1)); done
+planned=$((ncaps * ITERATIONS))
+for iter in $(seq 1 "$ITERATIONS"); do
+    echo ""
+    echo "########## ITERATION ${iter} / ${ITERATIONS} ##########"
+    for cores in $CAPS; do
+        total=$((total+1))
+        echo "[run ${total}/${planned}]"
+        read_once "$cores" "$iter"
+    done
 done
 
 echo ""
 echo "############################################################"
-echo "# read-only sweep complete (system=${SYS_KIND}). Result dirs:"
-ls -d result_readsweep_${SYS_KIND}_*_cpu* 2>/dev/null | sed 's/^/#   /'
+echo "# read-only sweep complete (system=${SYS_KIND}, ${ITERATIONS} iteration(s)). Result dirs:"
+ls -d result_readsweep_${SYS_KIND}_*_cpu*_iter* 2>/dev/null | sed 's/^/#   /'
 echo "############################################################"
 # trap clears the cap

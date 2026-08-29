@@ -61,7 +61,7 @@ if echo "$EXP_LABEL" | grep -qi rep; then SYS_KIND=rep; else SYS_KIND=ec; fi
 if [ -z "${CACHE_GB:-}" ]; then read -p "Cassandra memory cap in GB (e.g. 32): " CACHE_GB; fi
 if [ -z "${RTHREADS:-}" ]; then read -p "Read (run) threads: " RTHREADS; fi
 if [ -z "${MEASURE_OPS:-}" ]; then read -p "Read operationcount [default 2000000]: " MEASURE_OPS; MEASURE_OPS="${MEASURE_OPS:-2000000}"; fi
-if [ -z "${CAPS:-}" ]; then read -p "CPU caps to sweep, cores/node [default: 3 2 1]: " CAPS; CAPS="${CAPS:-3 2 1}"; fi
+if [ -z "${CAPS:-}" ]; then read -p "CPU caps to sweep, cores/node [default: 16..1 full]: " CAPS; CAPS="${CAPS:-16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1}"; fi
 if [ -z "${ITERATIONS:-}" ]; then read -p "How many iterations (repeat the whole sweep N times) [default 1]: " ITERATIONS; ITERATIONS="${ITERATIONS:-1}"; fi
 case "$ITERATIONS" in ''|*[!0-9]*) ITERATIONS=1;; esac
 [ "$ITERATIONS" -lt 1 ] 2>/dev/null && ITERATIONS=1

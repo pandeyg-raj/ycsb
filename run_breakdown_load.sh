@@ -179,14 +179,18 @@ hard_restart_cluster() {
     echo "  [3/3] Starting sequentially under ${cache_size} cgroup cap (seeds first)..."
     for node in "${BD_NODES[@]}"; do
         local ip="10.10.1.$node"
-        # Set memory.max, move this shell into the cgroup, then exec cassandra so
-        # the daemon inherits the cgroup membership (same pattern as restart_cluster).
+        # Set memory.max + cpu.max, move this shell into the cgroup, evict the
+        # data dir from page cache (vmtouch; non-fatal if absent -- note it is a
+        # near-no-op here since data was just wiped), then exec cassandra so the
+        # daemon inherits cgroup membership. vmtouch is NOT chained with && to
+        # cassandra, so a missing vmtouch can never block startup.
         ssh ${SSH_USER}@${ip} \
             "cd ${CASS_DIR} && \
              echo '+cpu' | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 ; \
              echo ${mem_bytes} | sudo tee ${CGROUP}/memory.max > /dev/null && \
              echo '${CPU_MAX}' | sudo tee ${CGROUP}/cpu.max > /dev/null && \
-             echo \$\$ | sudo tee ${CGROUP}/cgroup.procs > /dev/null && \
+             echo \$\$ | sudo tee ${CGROUP}/cgroup.procs > /dev/null ; \
+             vmtouch -e data/ > /dev/null 2>&1 ; \
              bin/cassandra > /dev/null 2>&1"
         local a=0
         until ssh ${SSH_USER}@${ip} \

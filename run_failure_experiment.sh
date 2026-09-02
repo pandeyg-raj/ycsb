@@ -29,6 +29,13 @@
 YCSB_DIR=bin/ycsb.sh
 DB=cassandra-cql
 MEASURE_OPS=2000000          # lowered from 10M -- percentiles are steady-state
+# Scan (workload E) is special: each scan op touches up to maxscanlength rows, so
+# it does ~50x the work of a point op. Give it its own, lower op count and fewer
+# threads -- fewer threads keeps coordinator/heap pressure from collapsing the scan
+# tails into timeout artifacts. Scan is reported on its own terms (not compared
+# 1:1 with point-op throughput).
+SCAN_OPS=500000              # scan operationcount (vs 2M for point workloads)
+# SCAN_THREADS is set to 1/4 of the read thread count after the prompt, below.
 FIELD_LENGTH=10000           # object/write size (unchanged)
 RECORD_COUNT=7000000         # dataset size (unchanged)
 CACHE_SIZE="32GB"            # single cache size (no sweep)
@@ -268,17 +275,22 @@ run_all_workloads() {
     for i in "${!WORKLOAD_LABELS[@]}"; do
         local workload="${WORKLOAD_LABELS[$i]}"
         local params="${WORKLOAD_PARAMS[$i]}"
+        # scan (workload E) uses its own lower op count and fewer threads
+        local w_threads=$THREADS w_ops=$MEASURE_OPS
+        if [ "$workload" = "workloadE" ]; then
+            w_threads=$SCAN_THREADS; w_ops=$SCAN_OPS
+        fi
         local MEASURE_FILE="${out_dir}/${EXP_LABEL}_${phase}_${CACHE_SIZE}_${workload}Run${FIELD_LENGTH}Bytes.scr"
         log_banner "$log" "$EXP_LABEL" "$phase" "$CACHE_SIZE" "$workload" "$MEASURE_FILE"
-        echo "=== [${phase}] ${workload} ==="
+        echo "=== [${phase}] ${workload} (threads=${w_threads} ops=${w_ops}) ==="
 
         # reset breakdown on survivors
         for node in "${nodes[@]}"; do
             ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool breakdown --reset" 2>/dev/null
         done
 
-        $YCSB_DIR run $DB -threads $THREADS \
-            -p operationcount=$MEASURE_OPS \
+        $YCSB_DIR run $DB -threads $w_threads \
+            -p operationcount=$w_ops \
             -p ${params} \
             -p recordcount=${RECORD_COUNT} \
             -p fieldlength=${FIELD_LENGTH} \
@@ -311,6 +323,9 @@ done
 echo "Is this EC or REP?"; read EXP_LABEL
 echo "How many write threads (for load)?"; read WTHREADS
 echo "How many read/run threads?"; read THREADS
+# Scan uses 1/4 of the point-read thread count (floor 1), for cleaner scan tails.
+SCAN_THREADS=$(( THREADS / 4 )); [ "$SCAN_THREADS" -lt 1 ] && SCAN_THREADS=1
+echo "  -> scan (workload E) will use ${SCAN_THREADS} threads and ${SCAN_OPS} ops."
 COMPRESSION="on"
 if echo "$EXP_LABEL" | grep -qi "rep"; then
     CREATE_TABLE_BIN="create_table_rep_compr_${COMPRESSION}"

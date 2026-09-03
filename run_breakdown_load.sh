@@ -1042,6 +1042,8 @@ run_phase read "$MEASURE_OPS" read \
         -p fieldlength=${FIELD_LENGTH} \
         -p readproportion=1 -p updateproportion=0 -p scanproportion=0 -p insertproportion=0 \
         -p requestdistribution=${READ_DIST} \
+        -p cassandra.writeconsistencylevel=QUORUM \
+        -p cassandra.readconsistencylevel=QUORUM \
         -p measurement.raw.output_file="${OUT_DIR}/read/Read.scr" \
         -P commonworkload -s
 

@@ -119,7 +119,7 @@ public class DBWrapper extends DB {
       long st = System.nanoTime();
       db.cleanup();
       long en = System.nanoTime();
-      measure("CLEANUP", Status.OK, ist, st, en);
+      measure("CLEANUP", "", Status.OK, ist, st, en);
     }
   }
 
@@ -140,7 +140,7 @@ public class DBWrapper extends DB {
       long st = System.nanoTime();
       Status res = db.read(table, key, fields, result);
       long en = System.nanoTime();
-      measure("READ", res, ist, st, en);
+      measure("READ", key, res, ist, st, en);
       measurements.reportStatus("READ", res);
       return res;
     }
@@ -164,13 +164,13 @@ public class DBWrapper extends DB {
       long st = System.nanoTime();
       Status res = db.scan(table, startkey, recordcount, fields, result);
       long en = System.nanoTime();
-      measure("SCAN", res, ist, st, en);
+      measure("SCAN", startkey, res, ist, st, en);
       measurements.reportStatus("SCAN", res);
       return res;
     }
   }
 
-  private void measure(String op, Status result, long intendedStartTimeNanos,
+  private void measure(String op, String key, Status result, long intendedStartTimeNanos,
                        long startTimeNanos, long endTimeNanos) {
     String measurementName = op;
     if (result == null || !result.isOk()) {
@@ -182,7 +182,7 @@ public class DBWrapper extends DB {
       }
     }
     measurements.measure(measurementName,
-        (int) ((endTimeNanos - startTimeNanos) / 1000));
+        (int) ((endTimeNanos - startTimeNanos) / 1000), key);
     measurements.measureIntended(measurementName,
         (int) ((endTimeNanos - intendedStartTimeNanos) / 1000));
   }
@@ -203,7 +203,7 @@ public class DBWrapper extends DB {
       long st = System.nanoTime();
       Status res = db.update(table, key, values);
       long en = System.nanoTime();
-      measure("UPDATE", res, ist, st, en);
+      measure("UPDATE", key, res, ist, st, en);
       measurements.reportStatus("UPDATE", res);
       return res;
     }
@@ -226,7 +226,7 @@ public class DBWrapper extends DB {
       long st = System.nanoTime();
       Status res = db.insert(table, key, values);
       long en = System.nanoTime();
-      measure("INSERT", res, ist, st, en);
+      measure("INSERT", key, res, ist, st, en);
       measurements.reportStatus("INSERT", res);
       return res;
     }
@@ -245,7 +245,7 @@ public class DBWrapper extends DB {
       long st = System.nanoTime();
       Status res = db.delete(table, key);
       long en = System.nanoTime();
-      measure("DELETE", res, ist, st, en);
+      measure("DELETE", key, res, ist, st, en);
       measurements.reportStatus("DELETE", res);
       return res;
     }

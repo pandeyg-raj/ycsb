@@ -181,12 +181,22 @@ public class Measurements {
    * value.
    */
   public void measure(String operation, int latency) {
+    measure(operation, latency, null);
+  }
+
+  /**
+   * Report a single value of a single metric, along with the record key the
+   * operation touched. Only the raw measurement type records the key; other
+   * measurement types ignore it. E.g. operation="READ", latency is the measured
+   * value, key is the record key.
+   */
+  public void measure(String operation, int latency, String key) {
     if (measurementInterval == 1) {
       return;
     }
     try {
       OneMeasurement m = getOpMeasurement(operation);
-      m.measure(latency);
+      m.measure(latency, key);
     } catch (java.lang.ArrayIndexOutOfBoundsException e) {
       // This seems like a terribly hacky way to cover up for a bug in the measurement code
       System.out.println("ERROR: java.lang.ArrayIndexOutOfBoundsException - ignoring and continuing");

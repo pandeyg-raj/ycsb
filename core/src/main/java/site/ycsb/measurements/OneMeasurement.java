@@ -47,6 +47,18 @@ public abstract class OneMeasurement {
 
   public abstract void measure(int latency);
 
+  /**
+   * Key-aware measurement. Only the raw measurement type records the key; all
+   * other measurement types ignore it and fall back to the plain measure(int).
+   * Subclasses that care about the key (OneMeasurementRaw) override this.
+   *
+   * @param latency the measured latency in microseconds
+   * @param key     the record key this operation touched (may be empty)
+   */
+  public void measure(int latency, String key) {
+    measure(latency);
+  }
+
   public abstract String getSummary();
 
   /**

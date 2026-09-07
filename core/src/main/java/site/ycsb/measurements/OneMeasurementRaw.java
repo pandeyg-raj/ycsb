@@ -35,16 +35,19 @@ import java.util.Properties;
  */
 public class OneMeasurementRaw extends OneMeasurement {
   /**
-   * One raw data point, two fields: timestamp (ms) when the datapoint is
-   * inserted, and the value.
+   * One raw data point, three fields: timestamp (ms) when the datapoint is
+   * inserted, the value (latency in us), and the record key the operation
+   * touched (may be empty for ops without a single key, e.g. CLEANUP).
    */
   class RawDataPoint {
     private final long timestamp;
     private final int value;
+    private final String key;
 
-    public RawDataPoint(int value) {
+    public RawDataPoint(int value, String key) {
       this.timestamp = System.currentTimeMillis();
       this.value = value;
+      this.key = key;
     }
 
     public long timeStamp() {
@@ -53,6 +56,10 @@ public class OneMeasurementRaw extends OneMeasurement {
 
     public int value() {
       return value;
+    }
+
+    public String key() {
+      return key;
     }
   }
 
@@ -131,11 +138,17 @@ public class OneMeasurementRaw extends OneMeasurement {
 
   @Override
   public synchronized void measure(int latency) {
+    // No key supplied (callers that don't thread a key through). Record empty.
+    measure(latency, "");
+  }
+
+  @Override
+  public synchronized void measure(int latency, String key) {
     totalLatency += latency;
     windowTotalLatency += latency;
     windowOperations++;
 
-    measurements.add(new RawDataPoint(latency));
+    measurements.add(new RawDataPoint(latency, key == null ? "" : key));
   }
 
   @Override
@@ -145,11 +158,11 @@ public class OneMeasurementRaw extends OneMeasurement {
     // stdout.
 
     outputStream.println(getName() +
-        " latency raw data: op, timestamp(ms), latency(us)");
+        " latency raw data: op, timestamp(ms), latency(us), key");
     for (RawDataPoint point : measurements) {
       outputStream.println(
-          String.format("%s,%d,%d", getName(), point.timeStamp(),
-              point.value()));
+          String.format("%s,%d,%d,%s", getName(), point.timeStamp(),
+              point.value(), point.key()));
     }
     if (outputStream != System.out) {
       outputStream.close();

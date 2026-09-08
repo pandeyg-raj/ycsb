@@ -367,6 +367,27 @@ for node in "${ALL_NODES[@]}"; do
     done
     echo "  ${ip} settled"
 done
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAUSE: load complete, cluster is UP and fully loaded. Inspect key positions
+# now (e.g. nodetool describering / getendpoints) before the run phases begin.
+# The cluster will be stopped right after this for the snapshot, so do any
+# live-cluster position checks HERE while every node is still UN.
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "################################################################"
+echo ">>> LOAD COMPLETE. All ${NUM_NODES} nodes are UP and fully loaded."
+echo ">>>   Data is settled (compaction drained). You can now record key"
+echo ">>>   positions against the LIVE cluster, e.g.:"
+echo ">>>     ${CASS_DIR}/bin/nodetool describering ycsb > ring.txt"
+echo ">>>     ${CASS_DIR}/bin/nodetool getendpoints ycsb usertable <key>"
+echo ">>>"
+echo ">>>   The cluster will be STOPPED next (for the snapshot), so do any"
+echo ">>>   live position checks now. Press Enter when ready to continue to"
+echo ">>>   the run phases..."
+echo "################################################################"
+read -p ">>> Press Enter to continue (or Ctrl-C to stop here and inspect)... " _
+
 # drain -> stop -> snapshot (clean loaded state, all 5)
 echo "--- Draining all nodes ---"
 for node in "${ALL_NODES[@]}"; do ssh ${SSH_USER}@10.10.1.$node "${CASS_DIR}/bin/nodetool drain" & done

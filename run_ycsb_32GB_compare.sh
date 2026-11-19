@@ -323,6 +323,7 @@ WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT
 WARMUP_FILE="${OUT_DIR}/${EXP_LABEL}_Warmup.scr"
 log_banner "WARMUP (${WARMUP_OPS} ops)" "$WARMUP_FILE"
 echo "--- Cache-filling warmup: ${WARMUP_OPS} reads ---"
+WARMUP_START=$(date +%s)
 $YCSB_DIR run $DB -threads $THREADS \
     -p operationcount=$WARMUP_OPS \
     -p readproportion=1.0 -p updateproportion=0.0 -p insertproportion=0.0 \
@@ -332,6 +333,28 @@ $YCSB_DIR run $DB -threads $THREADS \
     -p cassandra.writeconsistencylevel=QUORUM -p cassandra.readconsistencylevel=QUORUM \
     -P commonworkload -s >> "$LOG" 2>&1
 echo "--- Warmup done ---"
+
+# Show warmup speed and let the user halve every workload if the run would take too long.
+WARMUP_SECS=$(( $(date +%s) - WARMUP_START )); [ "$WARMUP_SECS" -lt 1 ] && WARMUP_SECS=1
+WARMUP_RATE=$(( WARMUP_OPS / WARMUP_SECS ))
+TOTAL_OPS=0; for o in "${WORKLOAD_OPS[@]}"; do TOTAL_OPS=$(( TOTAL_OPS + o )); done
+[ "$WARMUP_RATE" -lt 1 ] && WARMUP_RATE=1
+EST_MIN=$(( TOTAL_OPS / WARMUP_RATE / 60 ))
+echo ""
+echo ">>> Warmup: ${WARMUP_OPS} reads in $(( WARMUP_SECS / 60 )) min = ${WARMUP_RATE} ops/s"
+echo ">>> Rough time for all workloads: ~${EST_MIN} min at current counts, ~$(( EST_MIN / 2 )) min if halved"
+echo ">>>   (scans in E are slower per op, so add some margin)"
+echo ">>> Use the SAME choice for every system."
+HALVE=no
+if read -t 900 -p "Halve all workload operation counts? (yes/no) [no, auto after 15 min]: " ans; then
+    HALVE=${ans:-no}
+else
+    echo ""; echo "  no answer in 15 min, keeping full counts"
+fi
+if [ "$HALVE" = "yes" ]; then
+    for i in "${!WORKLOAD_OPS[@]}"; do WORKLOAD_OPS[$i]=$(( WORKLOAD_OPS[$i] / 2 )); done
+fi
+echo "WORKLOAD_OPS: halved=${HALVE} counts=${WORKLOAD_OPS[*]} (warmup ${WARMUP_RATE} ops/s)" | tee -a "$LOG" "${OUT_DIR}/workload_ops.txt"
 
 # =============================================================================
 # 4) Workloads (compaction ON)

@@ -234,6 +234,28 @@ restart_in_cgroup() {
         done
         echo "  ${ip} UN"
     done
+    wait_cluster_settled
+}
+
+# Every node must see every node as UN, then wait SETTLE_SECS more for gossip to settle.
+# (ELECT starts in-heap "online recovery" if a read finds a replica that looks down.)
+SETTLE_SECS=120
+wait_cluster_settled() {
+    local total=${#NODES[@]} a=0
+    echo "--- Waiting until every node sees all ${total} nodes as UN ---"
+    while true; do
+        local ok=1
+        for n in "${NODES[@]}"; do
+            local c
+            c=$(ssh ${SSH_USER}@$(ip_of $n) "${CASS_DIR}/bin/nodetool status 2>/dev/null | grep -c '^UN'")
+            [ "${c:-0}" -eq "$total" ] || { ok=0; echo "  10.10.1.$n sees ${c:-0}/${total} UN"; }
+        done
+        [ "$ok" = "1" ] && break
+        a=$((a + 1)); [ "$a" -ge 60 ] && { echo "ERROR: cluster not fully UN after 10 min"; exit 1; }
+        sleep 10
+    done
+    echo "  all nodes see ${total}/${total} UN; settling ${SETTLE_SECS}s before the workload"
+    sleep "$SETTLE_SECS"
 }
 
 # Disk-read and page-cache counters (same for every system)

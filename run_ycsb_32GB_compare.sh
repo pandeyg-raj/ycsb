@@ -61,6 +61,8 @@ read -p "Keyspace [${KEYSPACE}]: " ans; KEYSPACE=${ans:-$KEYSPACE}
 read -p "Table    [${TABLE}]: " ans;    TABLE=${ans:-$TABLE}
 read -p "Write (load) threads [8]: " WTHREADS; WTHREADS=${WTHREADS:-8}
 read -p "Run threads [8]: " THREADS;          THREADS=${THREADS:-8}
+read -p "Data already loaded? Skip the load (yes/no) [no]: " SKIP_LOAD;          SKIP_LOAD=${SKIP_LOAD:-no}
+read -p "Wait for compaction to settle after load (yes/no) [no]: " WAIT_SETTLE; WAIT_SETTLE=${WAIT_SETTLE:-no}
 
 TS=$(date +%Y%m%d_%H%M)
 OUT_DIR="result_32GB_compare_${EXP_LABEL}_${TS}"
@@ -75,6 +77,7 @@ echo ">>> System   : ${EXP_LABEL}   (${CASS_DIR})"
 echo ">>> Table    : ${KEYSPACE}.${TABLE}"
 echo ">>> Cache    : ${CACHE_SIZE} cgroup  | records ${RECORD_COUNT} x ${FIELD_LENGTH}B random values"
 echo ">>> Threads  : load ${WTHREADS}, run ${THREADS}"
+echo ">>> Skip load: ${SKIP_LOAD}   | wait for compaction settle: ${WAIT_SETTLE}"
 echo ">>> Output   : ${OUT_DIR}"
 echo "################################################################"
 if [ "$EXP_LABEL" = "elect_noec" ]; then
@@ -84,7 +87,11 @@ fi
 echo ""
 echo "This script assumes MANUAL setup is done:"
 echo "  - cluster is running on all nodes (nodetool status: all UN)"
-echo "  - table ${KEYSPACE}.${TABLE} exists and is EMPTY, with its final options"
+if [ "$SKIP_LOAD" = "yes" ]; then
+    echo "  - table ${KEYSPACE}.${TABLE} is ALREADY LOADED with ${RECORD_COUNT} records"
+else
+    echo "  - table ${KEYSPACE}.${TABLE} exists and is EMPTY, with its final options"
+fi
 [ "$IS_ELECT" = "1" ] && echo "  - cold tier (OSSServer) running on ${COLD_TIER_IP}:8000"
 read -p "Is setup done? (yes/no): " ok
 [ "$ok" = "yes" ] || { echo "Aborting."; exit 1; }
@@ -250,6 +257,9 @@ record_configs "before_load"
 # =============================================================================
 # 2) Load (consistency from commonworkload = ALL; load latency not reported)
 # =============================================================================
+if [ "$SKIP_LOAD" = "yes" ]; then
+    echo "--- Skipping load (data already loaded) ---" | tee -a "$LOG"
+else
 LOAD_FILE="${OUT_DIR}/${EXP_LABEL}_Load.scr"
 log_banner "LOAD" "$LOAD_FILE"
 echo "--- Loading ${RECORD_COUNT} x ${FIELD_LENGTH}B random values into ${KEYSPACE}.${TABLE} ---"
@@ -268,8 +278,16 @@ if [ "$LOAD_RC" != "0" ] || [ "$LOAD_OPS" -lt $(( RECORD_COUNT * 99 / 100 )) ]; 
     tail -20 "$LOG"
     exit 1
 fi
+fi
 
-wait_for_compaction_settle
+if [ "$WAIT_SETTLE" = "yes" ]; then
+    wait_for_compaction_settle
+else
+    echo "--- Not waiting for compaction (same for all systems) ---" | tee -a "$LOG"
+fi
+for n in "${NODES[@]}"; do
+    echo "node$n pending=$(ssh ${SSH_USER}@$(ip_of $n) "${CASS_DIR}/bin/nodetool compactionstats 2>/dev/null | awk '/pending tasks/{print \$NF}'")"
+done | tee "${OUT_DIR}/pending_compactions_before_measure.txt"
 collect_tablestats "${OUT_DIR}/tablestats_after_load.txt"
 [ "$IS_ELECT" = "1" ] && collect_elect_state "${OUT_DIR}/elect_state_after_load.txt"
 

@@ -90,6 +90,7 @@ echo ">>> Table    : ${KEYSPACE}.${TABLE}"
 echo ">>> Cache    : ${CACHE_SIZE} cgroup  | records ${RECORD_COUNT} x ${FIELD_LENGTH}B random values"
 echo ">>> Threads  : load ${WTHREADS}, run ${THREADS}"
 echo ">>> Skip load: ${SKIP_LOAD}   | wait for compaction settle: ${WAIT_SETTLE}"
+echo ">>> Halve workloads: ${HALVE_WORKLOADS:-ask after warmup}"
 echo ">>> Output   : ${OUT_DIR}"
 echo "################################################################"
 if [ "$EXP_LABEL" = "elect_noec" ]; then
@@ -368,7 +369,10 @@ echo ">>> Rough time for all workloads: ~${EST_MIN} min at current counts, ~$(( 
 echo ">>>   (scans in E are slower per op, so add some margin)"
 echo ">>> Use the SAME choice for every system."
 HALVE=no
-if read -t 900 -p "Halve all workload operation counts? (yes/no) [no, auto after 15 min]: " ans; then
+if [ -n "${HALVE_WORKLOADS:-}" ]; then
+    HALVE=$HALVE_WORKLOADS
+    echo ">>> HALVE_WORKLOADS=${HALVE} set at start; not asking"
+elif read -t 900 -p "Halve all workload operation counts? (yes/no) [no, auto after 15 min]: " ans; then
     HALVE=${ans:-no}
 else
     echo ""; echo "  no answer in 15 min, keeping full counts"

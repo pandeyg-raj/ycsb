@@ -366,51 +366,8 @@ done
 collect_tablestats "${OUT_DIR}/tablestats_end.txt"
 [ "$IS_ELECT" = "1" ] && collect_elect_state "${OUT_DIR}/elect_state_end.txt"
 
-python3 - "$OUT_DIR" "$EXP_LABEL" << 'PYEOF'
-import sys, os, glob
-outdir, label = sys.argv[1], sys.argv[2]
-
-def pct(sorted_vals, p):
-    if not sorted_vals: return float('nan')
-    k = min(len(sorted_vals) - 1, int(round(p / 100.0 * (len(sorted_vals) - 1))))
-    return sorted_vals[k]
-
-def diskread_mb(before, after):
-    def parse(path):
-        d, node = {}, None
-        if not os.path.exists(path): return d
-        for line in open(path):
-            p = line.split()
-            if line.startswith('###'): node = p[1]; continue
-            if node and len(p) > 6 and p[2].startswith(('dm', 'nvme', 'sd')):
-                try: d[node] = int(p[5]) * 512
-                except ValueError: pass
-        return d
-    b, a = parse(before), parse(after)
-    return sum(a[n] - b.get(n, 0) for n in a) / 2**20 if a else float('nan')
-
-order = ["Warmup", "workloadC_warmup", "workloadB", "workloadD", "workloadA", "workloadC", "workloadE", "workloadF"]
-lines = [f"=== {label} | latency in ms (mean / p50 / p99) | disk read during workload ==="]
-for w in order:
-    path = os.path.join(outdir, f"{label}_{w}.scr")
-    if not os.path.exists(path): continue
-    lat = {}
-    for line in open(path):
-        p = line.strip().split(',')
-        if len(p) != 3 or not p[2].strip().isdigit(): continue
-        lat.setdefault(p[0].strip(), []).append(int(p[2]) / 1000.0)
-    dr = diskread_mb(os.path.join(outdir, f"counters_{w}_before.txt"), os.path.join(outdir, f"counters_{w}_after.txt"))
-    parts = []
-    for op in sorted(lat):
-        if op == "CLEANUP": continue
-        v = sorted(lat[op])
-        parts.append(f"{op} n={len(v)} {sum(v)/len(v):.2f}/{pct(v,50):.2f}/{pct(v,99):.2f}")
-    drs = f"  disk_read={dr:.0f}MB" if dr == dr else ""
-    lines.append(f"{w:18s} " + "  ".join(parts) + drs)
-out = "\n".join(lines)
-open(os.path.join(outdir, "summary.txt"), "w").write(out + "\n")
-print(out)
-PYEOF
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${SCRIPT_DIR}/summarize_32GB.py" "$OUT_DIR" "$EXP_LABEL"
 
 echo ""
 echo "All done: ${OUT_DIR}/  (summary.txt, run.log, *.scr, configs, counters, tablestats)"

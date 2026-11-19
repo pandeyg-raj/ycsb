@@ -47,6 +47,18 @@ WORKLOAD_PARAMS=(
 # =============================================================================
 # Interactive setup
 # =============================================================================
+read -p "Test mode (tiny counts, to check the script end to end)? (yes/no) [no]: " TEST_MODE
+TEST_MODE=${TEST_MODE:-no}
+if [ "$TEST_MODE" = "yes" ]; then
+    RECORD_COUNT=10000
+    WORKLOAD_OPS=(2000 2000 2000 2000 2000 200 2000)
+    TEST_WARMUP_OPS=2000
+    RESULT_PREFIX="result_TEST_32GB_compare"
+    echo ">>> TEST MODE: ${RECORD_COUNT} records, ${TEST_WARMUP_OPS} warmup reads, 2000 ops per workload (E: 200)"
+else
+    RESULT_PREFIX="result_32GB_compare"
+fi
+
 echo "Which system?  elect | elect_noec | ec (LEAST) | rep (Cassandra)"
 read EXP_LABEL
 case "$EXP_LABEL" in
@@ -65,7 +77,7 @@ read -p "Data already loaded? Skip the load (yes/no) [no]: " SKIP_LOAD;         
 read -p "Wait for compaction to settle after load (yes/no) [no]: " WAIT_SETTLE; WAIT_SETTLE=${WAIT_SETTLE:-no}
 
 TS=$(date +%Y%m%d_%H%M)
-OUT_DIR="result_32GB_compare_${EXP_LABEL}_${TS}"
+OUT_DIR="${RESULT_PREFIX}_${EXP_LABEL}_${TS}"
 mkdir -p "$OUT_DIR"
 LOG="${OUT_DIR}/run.log"
 BREAKDOWN_FILE="${OUT_DIR}/breakdown.txt"
@@ -306,6 +318,7 @@ available_bytes=$(( (cache_gb - HEAP_GB) * 1024 * 1024 * 1024 ))
 objects_that_fit=$(( available_bytes / SHARD ))
 WARMUP_OPS=$(( objects_that_fit < RECORD_COUNT ? objects_that_fit : RECORD_COUNT ))
 [ "$WARMUP_OPS" -lt 1000000 ] && WARMUP_OPS=1000000
+[ "$TEST_MODE" = "yes" ] && WARMUP_OPS=$TEST_WARMUP_OPS
 
 WARMUP_FILE="${OUT_DIR}/${EXP_LABEL}_Warmup.scr"
 log_banner "WARMUP (${WARMUP_OPS} ops)" "$WARMUP_FILE"
@@ -401,3 +414,10 @@ PYEOF
 
 echo ""
 echo "All done: ${OUT_DIR}/  (summary.txt, run.log, *.scr, configs, counters, tablestats)"
+if [ "$TEST_MODE" = "yes" ]; then
+    echo ""
+    echo "TEST MODE finished. Before the real run, start clean:"
+    echo "  1. stop the cluster, delete data/ and logs/ on every node (ELECT: recreate the data/ subdirectories)"
+    echo "  2. echo max | sudo tee ${CGROUP}/memory.max on every node"
+    echo "  3. start the cluster without the memory limit and recreate the keyspace and tables"
+fi

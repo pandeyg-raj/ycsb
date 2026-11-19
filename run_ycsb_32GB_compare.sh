@@ -259,7 +259,14 @@ $YCSB_DIR load $DB -threads $WTHREADS \
     ${YCSB_TABLE_PARAMS} \
     -p measurement.raw.output_file="$LOAD_FILE" \
     -P commonworkload -s >> "$LOG" 2>&1
-echo "--- Load done in $(( ($(date +%s) - LOAD_START) / 60 )) min ---"
+LOAD_RC=$?
+LOAD_OPS=$(grep -c '^INSERT,' "$LOAD_FILE" 2>/dev/null || echo 0)
+echo "--- Load done in $(( ($(date +%s) - LOAD_START) / 60 )) min: exit=${LOAD_RC}, inserts recorded=${LOAD_OPS} ---"
+if [ "$LOAD_RC" != "0" ] || [ "$LOAD_OPS" -lt $(( RECORD_COUNT * 99 / 100 )) ]; then
+    echo "ERROR: load failed or incomplete. Last lines of ${LOG}:"
+    tail -20 "$LOG"
+    exit 1
+fi
 
 wait_for_compaction_settle
 collect_tablestats "${OUT_DIR}/tablestats_after_load.txt"

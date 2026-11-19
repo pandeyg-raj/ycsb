@@ -119,7 +119,8 @@ check_prereqs() {
 }
 
 record_configs() {
-    local tag=$1 dir="${OUT_DIR}/config_${tag}"
+    local tag=$1
+    local dir="${OUT_DIR}/config_${tag}"
     mkdir -p "$dir"
     for n in "${NODES[@]}"; do
         local ip; ip=$(ip_of $n)
